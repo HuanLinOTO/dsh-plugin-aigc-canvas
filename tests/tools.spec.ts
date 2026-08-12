@@ -497,7 +497,7 @@ describe('registerTools (stub provider)', () => {
     await expect(tool.execute({ provider_id: 'nope', instructions: 'x' }, execFor('s1'))).rejects.toThrow(AigcError)
   })
 
-  it('aigc_canvas_place places a generated file at (x, y) with prompt + meta', async () => {
+  it('aigc_canvas_place places a generated file at (x, y) with prompt + meta + auto-recorded originalRequest', async () => {
     const httpTool = ctx.registered.get('aigc_http_request')!
     const generated = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"a red fox"}' }, execFor('s1')) as { file_path: string }
     const placeTool = ctx.registered.get('aigc_canvas_place')!
@@ -521,7 +521,16 @@ describe('registerTools (stub provider)', () => {
     expect(el.x).toBe(120)
     expect(el.y).toBe(340)
     expect(el.promptText).toBe('a red fox in the snow')
-    expect(el.meta).toEqual({ width: 1024, height: 1024, model: 'flux' })
+    // User-supplied meta is preserved, with originalRequest merged in.
+    expect(el.meta).toMatchObject({ width: 1024, height: 1024, model: 'flux' })
+    expect(el.meta?.originalRequest).toMatchObject({
+      providerId: 'stub',
+      method: 'POST',
+      path: '/v1/images/generations',
+    })
+    expect(el.meta?.originalRequest?.responseInfo?.kind).toBe('image')
+    expect(el.meta?.originalRequest?.responseInfo?.status).toBe(200)
+    expect(el.meta?.originalRequest?.responseInfo?.durationMs).toBeGreaterThanOrEqual(0)
     expect(el.producedBy).toBe('aigc_canvas_place')
   })
 
@@ -590,7 +599,7 @@ describe('registerTools (stub provider)', () => {
     await expect(placeTool.execute({ file_path: f.file_path, x: 0, y: 0 } as never, execFor('s1'))).rejects.toThrow()
   })
 
-  it('aigc_canvas_place coerces stringified JSON meta into an object', async () => {
+  it('aigc_canvas_place coerces stringified JSON meta into an object (and still gets originalRequest)', async () => {
     const httpTool = ctx.registered.get('aigc_http_request')!
     const generated = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"coerce"}' }, execFor('s1')) as { file_path: string }
     const placeTool = ctx.registered.get('aigc_canvas_place')!
@@ -600,10 +609,15 @@ describe('registerTools (stub provider)', () => {
     }, execFor('s1')) as { element_path: string }
     const snap = canvas.snapshot('s1')
     const el = snap.elements.find(e => e.filePath === placed.element_path)!
-    expect(el.meta).toEqual({ size: '768x768', seed: 42 })
+    // Coerced user meta is preserved + originalRequest is merged in.
+    expect(el.meta).toMatchObject({ size: '768x768', seed: 42 })
+    expect(el.meta?.originalRequest).toBeDefined()
   })
 
-  it('aigc_canvas_place drops non-object meta silently', async () => {
+  it('aigc_canvas_place populates meta.originalRequest even when user meta is absent', async () => {
+    // When the model places a file produced by aigc_http_request WITHOUT
+    // passing any meta of its own, the host still records originalRequest
+    // so the element can be rerolled later.
     const httpTool = ctx.registered.get('aigc_http_request')!
     const generated = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"drop"}' }, execFor('s1')) as { file_path: string }
     const placeTool = ctx.registered.get('aigc_canvas_place')!
@@ -613,7 +627,95 @@ describe('registerTools (stub provider)', () => {
     }, execFor('s1')) as { element_path: string }
     const snap = canvas.snapshot('s1')
     const el = snap.elements.find(e => e.filePath === placed.element_path)!
+    // Non-object user meta is dropped silently, but originalRequest is still set.
+    expect(el.meta?.originalRequest).toBeDefined()
+    expect(el.meta?.originalRequest).toMatchObject({ providerId: 'stub', path: '/v1/images/generations' })
+  })
+
+  it('aigc_canvas_place leaves meta unset for files NOT from aigc_http_request (no snapshot)', async () => {
+    // A file placed by drag-drop (canvas.upload API) or created externally
+    // has no RequestSnapshot → meta stays undefined (no originalRequest).
+    const dir = canvasDirFor(cwd, 's1')
+    await mkdir(dir, { recursive: true })
+    const externalFile = join(dir, 'external.png')
+    await writeFile(externalFile, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    const placed = await placeTool.execute({ description: 'external', file_path: externalFile, x: 0, y: 0 }, execFor('s1')) as { element_path: string }
+    const snap = canvas.snapshot('s1')
+    const el = snap.elements.find(e => e.filePath === placed.element_path)!
     expect(el.meta).toBeUndefined()
+  })
+
+  it('aigc_canvas_place consumes the snapshot (second place of same file has no originalRequest)', async () => {
+    // The cache entry is consumed on first place — a second place of the
+    // same file (rare but possible) won't get originalRequest. This bounds
+    // memory growth: snapshots don't accumulate forever.
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const generated = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"twice"}' }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    const first = await placeTool.execute({ description: 'first', file_path: generated.file_path, x: 0, y: 0 }, execFor('s1')) as { element_path: string }
+    const second = await placeTool.execute({ description: 'second', file_path: generated.file_path, x: 100, y: 100 }, execFor('s1')) as { element_path: string }
+    const snap = canvas.snapshot('s1')
+    const firstEl = snap.elements.find(e => e.filePath === first.element_path)!
+    const secondEl = snap.elements.find(e => e.filePath === second.element_path && e !== firstEl)
+    expect(firstEl.meta?.originalRequest).toBeDefined()
+    // Second place: snapshot was already consumed → no originalRequest.
+    expect(secondEl?.meta?.originalRequest).toBeUndefined()
+  })
+
+  it('aigc_http_request records the unexpanded json_body (placeholders intact) in originalRequest', async () => {
+    // When the model uses $base64 placeholders, the snapshot keeps the
+    // UNEXPANDED form so reroll can re-resolve the reference at replay time.
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const refImg = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"ref"}' }, execFor('s1')) as { file_path: string }
+    // Now call http_request with a $base64 placeholder referencing refImg.
+    // Use /v1/models (returns JSON ack) so we can verify the body sent.
+    const generated = await httpTool.execute({
+      method: 'POST',
+      path: '/v1/images/generations',
+      json_body: { prompt: 'dance', image: { $base64: refImg.file_path }, size: '1024x1024' },
+    }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    const placed = await placeTool.execute({ description: 'test', file_path: generated.file_path, x: 0, y: 0 }, execFor('s1')) as { element_path: string }
+    const snap = canvas.snapshot('s1')
+    const el = snap.elements.find(e => e.filePath === placed.element_path)!
+    const body = el.meta?.originalRequest?.body as { prompt: string; image: { $base64: string }; size: string } | undefined
+    expect(body).toBeDefined()
+    expect(body?.prompt).toBe('dance')
+    expect(body?.size).toBe('1024x1024')
+    // The placeholder is preserved (NOT expanded to base64) — reroll will re-resolve it.
+    expect(body?.image).toEqual({ $base64: refImg.file_path })
+  })
+
+  it('aigc_http_request records the raw body string in originalRequest when body arg is used', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const generated = await httpTool.execute({
+      method: 'POST',
+      path: '/v1/images/generations',
+      body: '{"prompt":"raw body test","size":"512x512"}',
+    }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    const placed = await placeTool.execute({ description: 'test', file_path: generated.file_path, x: 0, y: 0 }, execFor('s1')) as { element_path: string }
+    const snap = canvas.snapshot('s1')
+    const el = snap.elements.find(e => e.filePath === placed.element_path)!
+    // For raw body inputs, the body is stored as the raw string (no parsing).
+    expect(el.meta?.originalRequest?.body).toBe('{"prompt":"raw body test","size":"512x512"}')
+  })
+
+  it('aigc_canvas_list_elements exposes meta.originalRequest in the projection', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const generated = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"listed"}' }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    await placeTool.execute({ description: 'test', file_path: generated.file_path, x: 0, y: 0 }, execFor('s1'))
+    const listTool = ctx.registered.get('aigc_canvas_list_elements')!
+    const result = await listTool.execute({}, execFor('s1')) as {
+      elements: Array<{ meta?: { originalRequest?: { providerId: string; method: string; path: string } } }>
+    }
+    expect(result.elements[0]!.meta?.originalRequest).toMatchObject({
+      providerId: 'stub',
+      method: 'POST',
+      path: '/v1/images/generations',
+    })
   })
 
   it('aigc_canvas_place auto-wires edges from references (legacy string form, default relation)', async () => {

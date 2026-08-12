@@ -50,6 +50,11 @@ import { canvasDirFor, EDGE_RELATIONS, DEFAULT_EDGE_RELATION, coerceEdgeRelation
 import { executeProviderRequest, INLINE_TEXT_CAP, type ProviderBinaryKind } from './provider-http.js'
 import { executeMediaEdit, MEDIA_EDIT_OPERATIONS, type MediaEditOperation } from './media-edit.js'
 import { AigcError } from './wire.js'
+import {
+  recordRequestSnapshot,
+  consumeRequestSnapshot,
+  type RequestSnapshot,
+} from './request-snapshot.js'
 
 /** Maximum length of a prompt title (derived from the prompt text). */
 const TITLE_MAX = 80
@@ -542,6 +547,11 @@ export function registerTools(
       //   - body: a raw string. $base64 / $data_uri placeholders are expanded
       //     here too when the body parses as JSON (non-JSON bodies pass through).
       let body: string | undefined
+      // bodyForSnapshot: the UNEXPANDED form (placeholders intact) so the
+      // reroll tool can patch structured fields and re-resolve $base64
+      // references at replay time. Object/array when json_body was used;
+      // raw string when body was used; undefined when no body.
+      let bodyForSnapshot: unknown
       if (args.json_body !== undefined) {
         let jsonValue: unknown = args.json_body
         if (typeof jsonValue === 'string') {
@@ -553,10 +563,12 @@ export function registerTools(
             } catch (e) {
               throw new AigcError('bad-request', `json_body is a string but not valid JSON: ${e instanceof Error ? e.message : String(e)}. Pass an object/array, or use the body parameter for raw non-JSON text.`)
             }
+            bodyForSnapshot = jsonValue
             const expanded = await expandBase64Placeholders(jsonValue, sessionId, cwd)
             body = JSON.stringify(expanded)
           }
         } else {
+          bodyForSnapshot = jsonValue
           const expanded = await expandBase64Placeholders(jsonValue, sessionId, cwd)
           body = JSON.stringify(expanded)
         }
@@ -564,6 +576,7 @@ export function registerTools(
         // Expand placeholders in raw body too, but only when the body is
         // valid JSON (placeholders are JSON objects like {"$base64": "..."}).
         // Non-JSON bodies (form-urlencoded, plain text) pass through unchanged.
+        bodyForSnapshot = args.body
         if (/\$(?:base64|data_uri)\b/.test(args.body)) {
           try {
             const parsed = JSON.parse(args.body)
@@ -577,6 +590,7 @@ export function registerTools(
           body = args.body
         }
       }
+      const requestStartedAt = Date.now()
       const result = await executeProviderRequest(provider, {
         method: args.method,
         path: args.path,
@@ -584,6 +598,32 @@ export function registerTools(
         query: args.query,
         body,
       }, { timeoutMs: getTimeoutMs(), signal: exec.signal })
+      const requestDurationMs = Date.now() - requestStartedAt
+
+      /**
+       * Record a RequestSnapshot for one saved file_path so the next
+       * aigc_canvas_place call can merge it into meta.originalRequest
+       * (enables aigc_reroll without the model having to remember the
+       * original request body / params / provider).
+       */
+      const recordSnapshot = (filePath: string, size: number | undefined, kind: string): void => {
+        const snapshot: RequestSnapshot = {
+          providerId: provider.id,
+          method: (args.method ?? (body !== undefined ? 'POST' : 'GET')).toUpperCase(),
+          path: args.path,
+          ...(args.query !== undefined ? { query: args.query } : {}),
+          ...(args.headers !== undefined ? { headers: args.headers } : {}),
+          ...(bodyForSnapshot !== undefined ? { body: bodyForSnapshot } : {}),
+          responseInfo: {
+            status: result.status,
+            contentType: result.contentType,
+            kind,
+            ...(size !== undefined ? { size } : {}),
+            durationMs: requestDurationMs,
+          },
+        }
+        recordRequestSnapshot(sessionId, filePath, snapshot)
+      }
 
       if (!result.ok) {
         return {
@@ -612,6 +652,7 @@ export function registerTools(
                 throw new AigcError('backend-error', `extracted image too large (${extracted.bytes.byteLength} bytes > ${getMediaLimit()} limit)`, 413)
               }
               const filePath = await saveResponseToSession(extracted.bytes, extracted.ext, sessionId, cwd)
+              recordSnapshot(filePath, extracted.bytes.byteLength, 'image')
               return {
                 ok: true,
                 status: result.status,
@@ -636,14 +677,16 @@ export function registerTools(
           // file_path. The model can read the file with its own tools.
           const filePath = await saveResponseToSession(result.text, result.kind === 'json' ? 'json' : 'txt', sessionId, cwd)
           const preview = result.text.slice(0, INLINE_TEXT_CAP)
+          const size = Buffer.byteLength(result.text)
+          recordSnapshot(filePath, size, result.kind)
           return {
             ok: true,
             status: result.status,
             kind: result.kind,
             content_type: result.contentType,
-            text: `${preview}\n… [response truncated; full ${Buffer.byteLength(result.text)} bytes saved to ${filePath} — read it with your file tools]`,
+            text: `${preview}\n… [response truncated; full ${size} bytes saved to ${filePath} — read it with your file tools]`,
             file_path: filePath,
-            file_size: Buffer.byteLength(result.text),
+            file_size: size,
           }
         }
         default: {
@@ -653,6 +696,7 @@ export function registerTools(
             throw new AigcError('backend-error', `provider response too large to save (${result.size} bytes > ${getMediaLimit()} limit)`, 413)
           }
           const filePath = await saveResponseToSession(result.bytes, ext, sessionId, cwd)
+          recordSnapshot(filePath, result.size, result.kind)
           return {
             ok: true,
             status: result.status,
@@ -842,7 +886,21 @@ export function registerTools(
       }
       // Bound description to 40 chars to keep cards compact.
       const description = args.description.slice(0, 40)
-      const meta = coerceMeta(args.meta)
+      const userMeta = coerceMeta(args.meta)
+      // Consume any RequestSnapshot cached for this file_path by a previous
+      // aigc_http_request call. The snapshot is merged into meta.originalRequest
+      // so the model can later reroll the element (aigc_reroll) without
+      // having to remember the original request body / params / provider.
+      // The cache entry is REMOVED on consume to bound memory growth.
+      const snapshot = consumeRequestSnapshot(sessionId, args.file_path)
+      const meta: Record<string, unknown> | undefined = (() => {
+        if (userMeta === undefined && snapshot === undefined) return undefined
+        const merged: Record<string, unknown> = { ...(userMeta ?? {}) }
+        if (snapshot !== undefined) {
+          merged.originalRequest = snapshot
+        }
+        return merged
+      })()
       // Coerce references into a uniform { uuid, relation?, note? } shape.
       // Accepts both the legacy string[] form and the new structured form.
       let refInputs: { uuid: string; relation?: EdgeRelation; note?: string }[] | undefined

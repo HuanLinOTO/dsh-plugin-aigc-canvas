@@ -1,0 +1,19 @@
+# dsh-aigc-canvas bundle layer: inserts the plugin row.
+# Loaded by `dsh plugin --profile <name> add @dsh-external/dsh-aigc-canvas`.
+# The `name` is the package entry; Loader resolves it from profile node_modules.
+# Provider config is editable at runtime via the DSH GUI settings page;
+# the values below are first-boot seeds only. The stub provider
+# (endpoint=stub://aigc-backend) produces synthetic test media — no real API calls.
+- insert:
+    - id: dsh-aigc-canvas
+      name: '@dsh-external/dsh-aigc-canvas'
+      config:
+        providers:
+          - id: stub
+            name: ''
+            endpoint: 'stub://aigc-backend'
+            apiKey: ''
+            instructions: ''
+            builtin: true
+        requestTimeoutMs: 300000
+        mediaSizeLimit: 104857600

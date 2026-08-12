@@ -1,0 +1,538 @@
+/* dsh-aigc-canvas client styles.
+ *
+ * Renders inside a better-sidebar tab panel. Follows the DSH core design
+ * language: `--dsw-alias-*` semantic tokens, `--dsw-font-*` typography,
+ * 36px header bar + 24x24 r6 icon buttons (mirror of SubagentView), 8px
+ * radius cards on `--dsw-alias-bg-layer-2`, no aggressive borders —
+ * hover/active fills carry the interaction state.
+ */
+
+.canvas {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  font: var(--dsw-font-s-14);
+  color: var(--dsw-alias-label-primary);
+  background: transparent;
+}
+
+/* ── Header bar (mirror SubagentView: 36px h, 0 8px 0 12px) ────────────── */
+
+.header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 8px 0 12px;
+}
+
+.title {
+  flex: 1;
+  min-width: 0;
+  font: var(--dsw-font-s-14);
+  color: var(--dsw-alias-label-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.count {
+  flex: none;
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.zoom {
+  flex: none;
+  min-width: 36px;
+  text-align: center;
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.iconButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font: var(--dsw-font-s-14);
+  line-height: 1;
+}
+
+.iconButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Zoom slider in the header. */
+.zoomSlider {
+  flex: none;
+  width: 80px;
+  height: 4px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+
+.zoomSlider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.zoomSlider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: none;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+/* ── Infinite canvas surface ───────────────────────────────────────────── */
+
+.surface {
+  flex: 1 1 auto;
+  position: relative;
+  overflow: hidden;
+  touch-action: none;
+  cursor: grab;
+  background-color: transparent;
+  background-image:
+    radial-gradient(var(--dsw-alias-border-l2) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.surface:active {
+  cursor: grabbing;
+}
+
+.world {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+}
+
+.edgeLayer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.edgeLine {
+  stroke: var(--dsw-alias-label-tertiary);
+  stroke-width: 2.5;
+  stroke-opacity: 0.55;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.edgeArrow {
+  fill: var(--dsw-alias-label-tertiary);
+  fill-opacity: 0.6;
+  stroke: var(--dsw-alias-label-tertiary);
+  stroke-width: 1;
+  stroke-opacity: 0.6;
+}
+
+.edgePort {
+  fill: var(--dsw-alias-bg-layer-2);
+  stroke: var(--dsw-alias-label-tertiary);
+  stroke-width: 2;
+  stroke-opacity: 0.7;
+}
+
+.nodeBox {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 240px;
+}
+
+.nodeBoxDraggable {
+  cursor: move;
+  touch-action: none;
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 24px 16px;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-tertiary);
+  text-align: center;
+}
+
+.emptyHint {
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-dimmed);
+}
+
+/* ── Node card (8px radius, bg-layer-2, no aggressive borders) ─────────── */
+
+.node {
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  overflow: hidden;
+}
+
+.nodeHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+}
+
+.kindDot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.kindDot_image { background: #4caf50; }
+.kindDot_video { background: #ff9800; }
+.kindDot_audio { background: #ab47bc; }
+.kindDot_prompt { background: #6b8cff; }
+
+.kindLabel {
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary);
+  text-transform: lowercase;
+}
+
+.nodeTime {
+  margin-left: auto;
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-dimmed);
+}
+
+.nodeTitle {
+  padding: 0 10px 4px;
+  font: var(--dsw-font-s-14);
+  color: var(--dsw-alias-label-primary);
+  word-break: break-word;
+}
+
+.nodeDescription {
+  padding: 0 10px 4px;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-tertiary);
+  font-style: italic;
+  word-break: break-word;
+}
+
+.nodeMedia {
+  padding: 0 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.promptText {
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-radius: 6px;
+  font: var(--dsw-font-xxs-12);
+  font-family: var(--ds-font-family-code);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.mediaImage {
+  /* Counter-scale trick: decode at the on-screen pixel size (layout width
+   * × zoom) so zooming in stays crisp, then visually shrink back to the
+   * layout box. `--canvas-scale` is set on the world layer by CanvasView;
+   * `--media-ratio` (h/w) is set on each img by CanvasNode after onLoad.
+   *
+   * width = 100% × scale        → layout box (e.g. 880px at 4× zoom)
+   * transform: scale(1/scale)   → visual 220px (back to layout box size)
+   * margin-right: 100% × (1-s)  → cancel horizontal layout inflation
+   * margin-bottom: 100% × ratio × (1-s) → cancel vertical layout inflation
+   *
+   * Percentages on margin resolve against the containing block's WIDTH
+   * (the 220px card content area), so `100%` = 220px here — which is
+   * exactly the visual width, making the math work out. */
+  width: calc(100% * var(--canvas-scale, 1));
+  max-width: none;
+  height: auto;
+  transform: scale(calc(1 / var(--canvas-scale, 1)));
+  transform-origin: top left;
+  margin-right: calc(100% * (1 - var(--canvas-scale, 1)));
+  margin-bottom: calc(100% * var(--media-ratio, 0.75) * (1 - var(--canvas-scale, 1)));
+  border-radius: 4px;
+  display: block;
+}
+
+.mediaVideo {
+  width: calc(100% * var(--canvas-scale, 1));
+  max-width: none;
+  height: auto;
+  transform: scale(calc(1 / var(--canvas-scale, 1)));
+  transform-origin: top left;
+  margin-right: calc(100% * (1 - var(--canvas-scale, 1)));
+  margin-bottom: calc(100% * var(--media-ratio, 0.75) * (1 - var(--canvas-scale, 1)));
+  border-radius: 4px;
+  display: block;
+}
+
+.mediaAudio {
+  width: 100%;
+  display: block;
+}
+
+.boundaryError {
+  margin: 8px;
+  padding: 8px 12px;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-state-error-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-radius: 6px;
+}
+
+/* ── Detail panel (elevated surface, mirror Modal/Panel aesthetic) ─────── */
+
+.detailPanel {
+  position: absolute;
+  right: 8px;
+  top: 44px;
+  bottom: 8px;
+  width: 280px;
+  display: flex;
+  flex-direction: column;
+  background: var(--dsw-alias-bg-layer-2);
+  border-radius: 12px;
+  box-shadow: var(--dsw-shadow-lv3);
+  z-index: 10;
+  overflow: hidden;
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+.detailHeader {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.detailTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: var(--dsw-font-s-14);
+  color: var(--dsw-alias-label-primary);
+  word-break: break-word;
+}
+
+.detailClose {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font: var(--dsw-font-s-14);
+  line-height: 1;
+}
+
+.detailClose:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.detailBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.detailBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.detailLabel {
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary);
+  text-transform: lowercase;
+}
+
+.detailPrompt {
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-radius: 6px;
+  font: var(--dsw-font-xxs-12);
+  font-family: var(--ds-font-family-code);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow-y: auto;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.detailValue {
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-secondary);
+  word-break: break-word;
+}
+
+.metaList {
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.metaKey {
+  font: var(--dsw-font-xxxs-strong-11);
+  color: var(--dsw-alias-label-secondary);
+  text-transform: lowercase;
+}
+
+.metaValue {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  word-break: break-all;
+  font-family: var(--ds-font-family-code);
+}
+
+.filePath {
+  display: block;
+  font: var(--dsw-font-xxxs-11);
+  font-family: var(--ds-font-family-code);
+  color: var(--dsw-alias-label-tertiary);
+  word-break: break-all;
+  background: var(--dsw-alias-interactive-bg-hover);
+  padding: 4px 6px;
+  border-radius: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Minimap (bottom-right overview) ──────────────────────────────────── */
+
+.minimap {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 5;
+  background: var(--dsw-alias-bg-layer-2);
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+  padding: 4px;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.minimapSvg {
+  display: block;
+  pointer-events: none;
+}
+
+/* ── Right-click context menu ─────────────────────────────────────────── */
+
+.contextMenu {
+  position: fixed;
+  z-index: 20;
+  min-width: 120px;
+  background: var(--dsw-alias-bg-layer-2);
+  border-radius: 8px;
+  box-shadow: var(--dsw-shadow-lv3);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.contextMenuItem {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12);
+  text-align: left;
+  cursor: pointer;
+}
+
+.contextMenuItem:hover {
+  background: var(--dsw-alias-state-error-bg);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* ── Drag-drop indicator + upload overlay ─────────────────────────────── */
+
+.dropIndicator {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 240px;
+  height: 110px;
+  border: 2px dashed var(--dsw-alias-label-secondary);
+  border-radius: 8px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  opacity: 0.5;
+  pointer-events: none;
+  transform-origin: 0 0;
+}
+
+.uploadOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--dsw-alias-bg-layer-1);
+  opacity: 0.6;
+  font: var(--dsw-font-s-14);
+  color: var(--dsw-alias-label-secondary);
+  pointer-events: none;
+}

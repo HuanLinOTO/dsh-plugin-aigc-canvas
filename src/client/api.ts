@@ -181,3 +181,37 @@ export function canvasWsUrl(sessionId: string): string {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${proto}//${window.location.host}/aigc-canvas/ws/canvas?sessionId=${encodeURIComponent(sessionId)}`
 }
+
+// ── Request log (per docs/product/04-ux-reliability.md §3) ──────────────
+
+/** One request log entry (client view; matches the host RequestLogEntry). */
+export interface RequestLogEntry {
+  id: number
+  timestamp: number
+  type: 'http' | 'media_edit'
+  providerId?: string
+  method?: string
+  path?: string
+  operation?: string
+  inputs?: string[]
+  status: number
+  durationMs: number
+  size?: number
+  error?: string
+  requestHeaders?: Record<string, string>
+  requestQuery?: Record<string, string>
+  requestBodyPreview?: string
+  responseContentType?: string
+  responseBodyPreview?: string
+  elementPath?: string
+}
+
+/** Fetch the request log for one session (newest last). */
+export function fetchRequestLog(sessionId: string, signal?: AbortSignal): Promise<{ entries: RequestLogEntry[] }> {
+  return call<{ entries: RequestLogEntry[] }>('logs.list', { sessionId }, signal)
+}
+
+/** Clear the request log for one session. */
+export function clearRequestLog(sessionId: string, signal?: AbortSignal): Promise<{ ok: boolean }> {
+  return call<{ ok: boolean }>('logs.clear', { sessionId }, signal)
+}

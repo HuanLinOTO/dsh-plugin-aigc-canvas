@@ -41,17 +41,21 @@ dsh plugin --profile <profile> add github:dsh-external/dsh-aigc-canvas
 
 ## 工具
 
-模型可见的九个工具,均在调用代理的会话作用域内执行(模型不需要传 `sessionId`):
+模型可见的十三个工具,均在调用代理的会话作用域内执行(模型不需要传 `sessionId`):
 
 | 工具 | 用途 |
 |------|------|
-| `aigc_get_provider_info` | 列出所有 provider(id/name/endpoint/instructions 预览/stub 标志)。**最先调用** |
-| `aigc_http_request` | 向 provider API 发 HTTP 请求(endpoint + apiKey 自动附加)。二进制响应落盘返回 `file_path`,JSON/文本内联返回 |
-| `aigc_provider_set_instructions` | 探测 API 后记录 provider 的调用说明(每 provider 限 1000 字) |
+| `aigc_get_provider_info` | 列出所有 provider(id/name/endpoint/instructions 预览/capabilities/capabilityMap/stub 标志)。**最先调用** |
+| `aigc_http_request` | 向 provider API 发 HTTP 请求(endpoint + apiKey 自动附加)。二进制响应落盘返回 `file_path`,JSON/文本内联返回。有 EndpointSpec 时按 spec 处理响应 |
+| `aigc_provider_set_instructions` | 探测 API 后记录 provider 的调用说明(每 provider 限 1000 字,旧式自由文本) |
 | `aigc_provider_get_instructions` | 拉取一个 provider 的完整 instructions(`aigc_get_provider_info` 只返回前 200 字预览) |
-| `aigc_canvas_place` | 把文件摆到画布上(可选 x/y,可自动布局;可附 references 自动连边) |
-| `aigc_canvas_link` / `aigc_canvas_unlink` | 创建/删除两个元素之间的边(filePath 寻址) |
-| `aigc_canvas_list_elements` | 只读:返回当前会话画布的完整快照(elements + edges) |
+| `aigc_provider_set_endpoints` | 探测 API 后记录结构化 EndpointSpec[] catalog(自动派生 instructions,支持 spec 驱动响应处理) |
+| `aigc_get_endpoint_details` | 拉取一个 provider+capability 的完整 EndpointSpec[](path/method/params/response shape) |
+| `aigc_probe_endpoint` | 向一个 endpoint 发最小测试请求,自动嗅探响应格式(ResponseKind + path) |
+| `aigc_reroll` | 基于已有元素的 `meta.originalRequest` 重新生成(支持 seed/prompt_delta/prompt_replace/size patch,count>1 时生成变体簇) |
+| `aigc_canvas_place` | 把文件摆到画布上(可选 x/y,可自动布局;可附 references + relation 自动连边) |
+| `aigc_canvas_link` / `aigc_canvas_unlink` | 创建/删除两个元素之间的边(filePath 寻址,relation 必填:input/first_frame/style/variation_of/...) |
+| `aigc_canvas_list_elements` | 只读:返回当前会话画布的完整快照(elements + edges with relation) |
 | `aigc_media_edit` | ffmpeg 编辑(concat/clip/extract_audio/extract_frame/speed/resize/reverse/add_audio/images_to_video) |
 
 ### `aigc_get_provider_info`
@@ -137,7 +141,9 @@ dsh plugin --profile <profile> add github:dsh-external/dsh-aigc-canvas
 - 首次加载会先 HTTP `POST /aigc-canvas/api/canvas.list` priming 一次快照
 - 节点按 vertical flow 排列,每个节点的入边在节点上方以 chip 形式显示
 - 不同 kind 用左侧色条区分:prompt 蓝 / image 绿 / video 橙 / audio 紫
+- 边按 relation 分线型:实线=直接输入(input/first_frame/last_frame/audio_track),虚线=参考(reference/style/mask),点线=变体(variation_of/remix_of/alternative_of),粗实线=编辑链(edited_from)。曲线中点显示关系标签
 - WS 断开后自动重连
+- **请求日志面板**:header 上的 📊 按钮打开浮层,显示本会话所有 `aigc_http_request` + `aigc_media_edit` 调用(时间/provider/path/状态/耗时/大小),点条目展开详情(请求头 + 请求体 + 响应预览,apiKey 已脱敏),可"在画布上定位"产物元素
 
 > better-sidebar 未安装时,host 半的工具 + 元素表仍然正常工作,只是没有 UI 可视化(未来的 host-side 消费者可以通过 `ctx.aigcCanvas` 服务读取状态)。
 

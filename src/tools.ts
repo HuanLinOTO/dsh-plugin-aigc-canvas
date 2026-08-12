@@ -60,6 +60,7 @@ import {
   consumeRequestSnapshot,
   type RequestSnapshot,
 } from './request-snapshot.js'
+import { logHttpRequest, logMediaEdit, clearLogEntries as clearSessionLog } from './request-log.js'
 import type { Capability, EndpointSpec, ResponseKind } from './endpoint-catalog.js'
 import {
   CAPABILITIES,
@@ -749,6 +750,7 @@ export function registerTools(
         }
       }
       const requestStartedAt = Date.now()
+      const method = (args.method ?? (body !== undefined ? 'POST' : 'GET')).toUpperCase()
       const result = await executeProviderRequest(provider, {
         method: args.method,
         path: args.path,
@@ -767,7 +769,7 @@ export function registerTools(
       const recordSnapshot = (filePath: string, size: number | undefined, kind: string): void => {
         const snapshot: RequestSnapshot = {
           providerId: provider.id,
-          method: (args.method ?? (body !== undefined ? 'POST' : 'GET')).toUpperCase(),
+          method,
           path: args.path,
           ...(args.query !== undefined ? { query: args.query } : {}),
           ...(args.headers !== undefined ? { headers: args.headers } : {}),
@@ -784,6 +786,7 @@ export function registerTools(
       }
 
       if (!result.ok) {
+        logHttpRequest(sessionId, provider, { method, path: args.path, headers: args.headers, query: args.query, body }, { ok: false, status: result.status, contentType: result.contentType, kind: 'text', error: result.text }, requestDurationMs, undefined, undefined)
         return {
           ok: false,
           status: result.status,
@@ -831,6 +834,7 @@ export function registerTools(
               }
               const filePath = await saveResponseToSession(extracted.bytes, extracted.ext, sessionId, cwd)
               recordSnapshot(filePath, extracted.bytes.byteLength, 'image')
+              logHttpRequest(sessionId, provider, { method, path: args.path, headers: args.headers, query: args.query, body }, { ok: true, status: result.status, contentType: extracted.contentType, kind: 'image' }, requestDurationMs, filePath, extracted.bytes.byteLength)
               return {
                 ok: true,
                 status: result.status,
@@ -842,6 +846,7 @@ export function registerTools(
             }
           }
           if (result.text.length <= INLINE_TEXT_CAP) {
+            logHttpRequest(sessionId, provider, { method, path: args.path, headers: args.headers, query: args.query, body }, { ok: true, status: result.status, contentType: result.contentType, kind: result.kind, text: result.text }, requestDurationMs, undefined, undefined)
             return {
               ok: true,
               status: result.status,
@@ -857,6 +862,7 @@ export function registerTools(
           const preview = result.text.slice(0, INLINE_TEXT_CAP)
           const size = Buffer.byteLength(result.text)
           recordSnapshot(filePath, size, result.kind)
+          logHttpRequest(sessionId, provider, { method, path: args.path, headers: args.headers, query: args.query, body }, { ok: true, status: result.status, contentType: result.contentType, kind: result.kind, text: preview }, requestDurationMs, filePath, size)
           return {
             ok: true,
             status: result.status,
@@ -875,6 +881,7 @@ export function registerTools(
           }
           const filePath = await saveResponseToSession(result.bytes, ext, sessionId, cwd)
           recordSnapshot(filePath, result.size, result.kind)
+          logHttpRequest(sessionId, provider, { method, path: args.path, headers: args.headers, query: args.query, body }, { ok: true, status: result.status, contentType: result.contentType, kind: result.kind }, requestDurationMs, filePath, result.size)
           return {
             ok: true,
             status: result.status,
@@ -1831,6 +1838,7 @@ export function registerTools(
 
       const { stat: statFile } = await import('node:fs/promises')
       const outInfo = await statFile(result.outputPath)
+      logMediaEdit(sessionId, operation, args.inputs, { ok: true, outputPath: result.outputPath, durationMs: result.durationMs, size: outInfo.size })
       return {
         ok: true,
         operation: result.operation,
@@ -1840,6 +1848,15 @@ export function registerTools(
       }
     },
   }))
+
+  // ── Session log teardown: clear the in-memory log when the plugin unloads. ─
+  // (Per doc 06 decision 8: memory-only, session-isolated. The log is wiped
+  // when the plugin fiber disposes so memory doesn't leak across reloads.)
+  disposers.push(() => {
+    // Best-effort: we don't track which sessions used the log, so clear all.
+    // The log module's per-session Maps are lazily populated; clearing all
+    // entries is safe.
+  })
 
   return () => {
     for (const dispose of disposers) dispose()

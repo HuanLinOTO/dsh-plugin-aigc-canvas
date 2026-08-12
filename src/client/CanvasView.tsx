@@ -19,6 +19,7 @@ import { Component, createElement, useEffect, useRef, useState, useSyncExternalS
 import type { AigcCanvasState, AigcEdge, AigcElement, EdgeRelation } from './api.js'
 import { CanvasStore } from './store.js'
 import { CanvasNode } from './CanvasNode.js'
+import { RequestLogPanel } from './RequestLogPanel.js'
 import css from './canvas.module.css'
 
 /** Translation function type (from the DSH locale system). */
@@ -227,6 +228,7 @@ export function CanvasView({ store, t }: CanvasViewProps): ReactNode {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; uuid: string } | undefined>(undefined)
   const [dropTarget, setDropTarget] = useState<{ x: number; y: number } | undefined>(undefined)
   const [uploading, setUploading] = useState(false)
+  const [showLog, setShowLog] = useState(false)
   const surfaceRef = useRef<HTMLElement | null>(null)
 
   // Track the previous snapshot's element uuids so we can detect when new
@@ -591,6 +593,17 @@ export function CanvasView({ store, t }: CanvasViewProps): ReactNode {
         },
         '⤢',
       ),
+      createElement(
+        'button',
+        {
+          type: 'button',
+          className: `${css.iconButton} ${showLog ? css.iconButtonActive : ''}`,
+          onClick: () => setShowLog(!showLog),
+          title: t('logButton'),
+          'aria-label': t('logButton'),
+        },
+        '📊',
+      ),
     ),
     createElement(
       'div',
@@ -673,6 +686,27 @@ export function CanvasView({ store, t }: CanvasViewProps): ReactNode {
     ),
     selected !== undefined
       ? createElement(DetailPanel, { element: selected, t, onClose: () => setSelected(undefined) })
+      : null,
+    // Request log panel (toggled by the 📊 button in the header).
+    showLog && state.sessionId !== ''
+      ? createElement(RequestLogPanel, {
+          sessionId: state.sessionId,
+          t,
+          locateElement: (filePath: string) => {
+            // Find the element by filePath and pan the viewport to center on it.
+            const el = state.elements.find(e => e.filePath === filePath)
+            if (el !== undefined) {
+              const cx = el.x + 120 // half node width
+              const cy = el.y + 55  // half node height
+              setViewport({
+                x: (surfaceRef.current?.clientWidth ?? 800) / 2 - cx * viewport.scale,
+                y: (surfaceRef.current?.clientHeight ?? 600) / 2 - cy * viewport.scale,
+                scale: viewport.scale,
+              })
+              setSelected(el)
+            }
+          },
+        })
       : null,
     // Right-click context menu
     contextMenu !== undefined

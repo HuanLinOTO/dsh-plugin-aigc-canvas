@@ -79,6 +79,18 @@ export type AigcKey =
   | 'badge.stub'
   | 'badge.real'
   | 'badge.default'
+  // Request log panel
+  | 'logButton'
+  | 'logTitle'
+  | 'logClear'
+  | 'logEmpty'
+  | 'logLoading'
+  | 'logError'
+  | 'logRequestBody'
+  | 'logRequestHeaders'
+  | 'logResponseBody'
+  | 'logProducedFile'
+  | 'logLocate'
 
 export const zh: Record<AigcKey, string> = {
   tabTitle: 'AIGC 画布',
@@ -150,6 +162,17 @@ export const zh: Record<AigcKey, string> = {
   'badge.stub': 'stub 模式',
   'badge.real': '真实 API',
   'badge.default': '默认',
+  logButton: '日志',
+  logTitle: '请求日志',
+  logClear: '清空',
+  logEmpty: '暂无请求记录。',
+  logLoading: '加载中…',
+  logError: '错误',
+  logRequestBody: '请求体',
+  logRequestHeaders: '请求头',
+  logResponseBody: '响应预览',
+  logProducedFile: '产物文件',
+  logLocate: '在画布上定位',
 }
 
 export const en: Record<AigcKey, string> = {
@@ -222,4 +245,15 @@ export const en: Record<AigcKey, string> = {
   'badge.stub': 'stub mode',
   'badge.real': 'real API',
   'badge.default': 'default',
+  logButton: 'Logs',
+  logTitle: 'Request Log',
+  logClear: 'Clear',
+  logEmpty: 'No requests logged yet.',
+  logLoading: 'Loading…',
+  logError: 'Error',
+  logRequestBody: 'Request body',
+  logRequestHeaders: 'Request headers',
+  logResponseBody: 'Response preview',
+  logProducedFile: 'Produced file',
+  logLocate: 'Locate on canvas',
 }

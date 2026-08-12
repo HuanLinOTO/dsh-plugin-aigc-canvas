@@ -20,6 +20,7 @@ import { registerTools, elementProjection, edgeProjection, titleOf, type Provide
 import { AigcError } from '../src/wire.js'
 import type { ResolvedAigcProvider } from '../src/config.js'
 import type { EndpointSpec } from '../src/endpoint-catalog.js'
+import { getLogEntries, clearLogEntries, redactSecrets, type RequestLogEntry } from '../src/request-log.js'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 function execFor(sessionId: string): ToolRunContext {
@@ -1378,6 +1379,135 @@ describe('registerTools (stub provider)', () => {
       inputs: ['/fake.mp4'],
       output_ext: 'mp4',
     }, execFor('s1'))).rejects.toThrow()
+  })
+})
+
+// ── Request log (per docs/product/04-ux-reliability.md §3) ─────────────────
+describe('request log', () => {
+  let cwd: string
+  let canvas: AigcCanvasService
+  let ctx: MockTools
+  let dispose: () => void
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'aigc-log-'))
+    canvas = createAigcCanvasService(() => cwd)
+    ctx = mockCtx()
+    clearLogEntries('s1')
+    dispose = registerAll(ctx, [STUB_PROVIDER], canvas, cwd).dispose
+  })
+
+  afterEach(async () => {
+    dispose()
+    clearLogEntries('s1')
+    await rm(cwd, { recursive: true, force: true })
+  })
+
+  it('aigc_http_request logs an entry on success', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    await httpTool.execute({ method: 'POST', path: '/v1/images/generations', json_body: { prompt: 'test' } }, execFor('s1'))
+    const entries = getLogEntries('s1')
+    expect(entries).toHaveLength(1)
+    expect(entries[0]!.type).toBe('http')
+    expect(entries[0]!.providerId).toBe('stub')
+    expect(entries[0]!.method).toBe('POST')
+    expect(entries[0]!.path).toBe('/v1/images/generations')
+    expect(entries[0]!.status).toBe(200)
+    expect(entries[0]!.durationMs).toBeGreaterThanOrEqual(0)
+    // The produced file path should be recorded for "locate on canvas".
+    expect(entries[0]!.elementPath).toBeDefined()
+    expect(entries[0]!.size).toBeGreaterThan(0)
+  })
+
+  it('aigc_http_request logs an entry on failure (non-2xx)', async () => {
+    // Use a real provider with mocked fetch to simulate a failure.
+    const failCtx = mockCtx()
+    const failRegister = registerAll(failCtx, [REAL_PROVIDER], canvas, cwd)
+    try {
+      const fetchMock = vi.fn<typeof fetch>()
+      fetchMock.mockResolvedValue(new Response('quota exceeded', { status: 429, headers: { 'content-type': 'text/plain' } }))
+      vi.stubGlobal('fetch', fetchMock)
+      const httpTool = failCtx.registered.get('aigc_http_request')!
+      await httpTool.execute({ method: 'POST', path: '/v1/images/generations', json_body: { prompt: 'x' } }, execFor('s1'))
+      const entries = getLogEntries('s1')
+      expect(entries).toHaveLength(1)
+      expect(entries[0]!.status).toBe(429)
+      expect(entries[0]!.error).toContain('quota exceeded')
+      expect(entries[0]!.elementPath).toBeUndefined()
+    } finally {
+      vi.unstubAllGlobals()
+      failRegister.dispose()
+    }
+  })
+
+  it('aigc_http_request redacts the apiKey from logged request headers', async () => {
+    // Use a real provider with header auth + mocked fetch.
+    const headerProvider: ResolvedAigcProvider = {
+      ...REAL_PROVIDER,
+      id: 'header-auth',
+      auth: { scheme: 'header', name: 'x-api-key' },
+    }
+    const headerCtx = mockCtx()
+    const headerRegister = registerAll(headerCtx, [headerProvider], canvas, cwd)
+    try {
+      const fetchMock = vi.fn<typeof fetch>()
+      fetchMock.mockResolvedValue(new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }))
+      vi.stubGlobal('fetch', fetchMock)
+      const httpTool = headerCtx.registered.get('aigc_http_request')!
+      // Pass an extra header that should NOT be redacted.
+      await httpTool.execute({
+        method: 'POST',
+        path: '/v1/test',
+        headers: { 'x-custom': 'visible', 'x-api-key': 'should-not-appear' },
+        json_body: { prompt: 'x' },
+      }, execFor('s1'))
+      const entries = getLogEntries('s1')
+      expect(entries).toHaveLength(1)
+      const loggedHeaders = entries[0]!.requestHeaders!
+      // The custom header survives.
+      expect(loggedHeaders['x-custom']).toBe('visible')
+      // The api key header is redacted.
+      expect(loggedHeaders['x-api-key']).toBe('***')
+      // The apiKey value must NOT appear anywhere in the logged entry.
+      const serialized = JSON.stringify(entries[0])
+      expect(serialized).not.toContain('sk-test')
+    } finally {
+      vi.unstubAllGlobals()
+      headerRegister.dispose()
+    }
+  })
+
+  it('redactSecrets redacts bearer Authorization + sensitive header names', () => {
+    const provider: ResolvedAigcProvider = {
+      ...REAL_PROVIDER,
+      auth: { scheme: 'bearer', name: '' },
+    }
+    const result = redactSecrets(
+      { Authorization: 'Bearer sk-secret', 'x-api-key': 'also-secret', 'content-type': 'application/json', 'x-token': 'tok' },
+      undefined,
+      provider,
+    )
+    expect(result.headers!['Authorization']).toBe('Bearer ***')
+    expect(result.headers!['x-api-key']).toBe('***')
+    expect(result.headers!['x-token']).toBe('***')
+    expect(result.headers!['content-type']).toBe('application/json')
+  })
+
+  it('clearLogEntries wipes the session log', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    await httpTool.execute({ method: 'POST', path: '/v1/images/generations', json_body: { prompt: 'x' } }, execFor('s1'))
+    expect(getLogEntries('s1')).toHaveLength(1)
+    clearLogEntries('s1')
+    expect(getLogEntries('s1')).toHaveLength(0)
+  })
+
+  it('log entries are isolated per session', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    await httpTool.execute({ method: 'POST', path: '/v1/images/generations', json_body: { prompt: 'x' } }, execFor('s1'))
+    await httpTool.execute({ method: 'POST', path: '/v1/images/generations', json_body: { prompt: 'y' } }, execFor('s2'))
+    expect(getLogEntries('s1')).toHaveLength(1)
+    expect(getLogEntries('s2')).toHaveLength(1)
+    expect(getLogEntries('s1')[0]!.path).toBe('/v1/images/generations')
   })
 })
 

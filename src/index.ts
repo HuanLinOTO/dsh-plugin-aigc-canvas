@@ -42,6 +42,7 @@ import type { AigcAgent, AigcUserMessage } from './context-types.js'
 import { isTrustedApiRequest } from './trust-fence.js'
 import { registerTools, type ProviderInfo } from './tools.js'
 import { AigcError, readJsonBody, requireString, writeError, writeJson, writeOk } from './wire.js'
+import { getLogEntries, clearLogEntries, type RequestLogEntry } from './request-log.js'
 
 export { Config }
 export type { AigcCanvasConfig, AigcProvider, ResolvedAigcConfig, ResolvedAigcProvider }
@@ -247,6 +248,15 @@ function buildApi(
     },
     'config.get': () => {
       return { ...toGlobalSettings(getResolved()), providers: store.list() }
+    },
+    'logs.list': (payload) => {
+      const sessionId = requireString(payload, 'sessionId')
+      return { entries: getLogEntries(sessionId) }
+    },
+    'logs.clear': (payload) => {
+      const sessionId = requireString(payload, 'sessionId')
+      clearLogEntries(sessionId)
+      return { ok: true }
     },
   }
 }

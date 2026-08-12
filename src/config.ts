@@ -62,6 +62,10 @@ export interface AigcProvider {
   priority?: number
   /** Cost per call in USD (for cost tracking; future use). */
   costPerCall?: number
+  /** Cost per 1k tokens in USD (for chat/transcription cost tracking). */
+  costPerKiloToken?: number
+  /** Cost per second of video/audio in USD (for t2v/tts cost tracking). */
+  costPerSecond?: number
   /** Average latency in ms (host auto-statistic; future use). */
   avgLatencyMs?: number
   /** Quality hint used by the agent to pick fast vs. quality providers. */
@@ -133,6 +137,8 @@ const ProviderSchema = z.object({
   endpoints: z.array(EndpointSchema).description('Structured capability catalog. When non-empty, aigc_http_request uses the EndpointSpec.response.kind to process responses. Empty = legacy auto-sniff + instructions.').default([]),
   priority: z.number().step(1).description('Selection priority (smaller = higher priority; default 100). Drives capabilityMap ordering.').default(100),
   costPerCall: z.number().step(0.0001).description('Cost per call in USD (for cost tracking).').default(0),
+  costPerKiloToken: z.number().step(0.0001).description('Cost per 1k tokens in USD (for chat/transcription cost tracking).').default(0),
+  costPerSecond: z.number().step(0.0001).description('Cost per second of video/audio in USD (for t2v/tts cost tracking).').default(0),
   avgLatencyMs: z.number().step(1).description('Average latency in ms (host auto-statistic).').default(0),
   qualityHint: z.union(['fast', 'balanced', 'quality']).description('Quality hint: fast / balanced / quality.').default('balanced'),
 })
@@ -140,7 +146,7 @@ const ProviderSchema = z.object({
 /** Schemastery schema for the plugin configuration. */
 export const Config: z<AigcCanvasConfig> = z.object({
   providers: z.array(ProviderSchema).description('One or more AIGC providers; the first is the default.').default([
-    { id: 'stub', name: '', endpoint: 'stub://aigc-backend', apiKey: '', instructions: '', auth: { scheme: 'bearer', name: '' }, builtin: true, endpoints: [], priority: 100, costPerCall: 0, avgLatencyMs: 0, qualityHint: 'balanced' },
+    { id: 'stub', name: '', endpoint: 'stub://aigc-backend', apiKey: '', instructions: '', auth: { scheme: 'bearer', name: '' }, builtin: true, endpoints: [], priority: 100, costPerCall: 0, costPerKiloToken: 0, costPerSecond: 0, avgLatencyMs: 0, qualityHint: 'balanced' },
   ]),
   requestTimeoutMs: z.number().step(1).min(1000).default(300_000),
   mediaSizeLimit: z.number().step(1).min(1024).default(100 * 1024 * 1024),
@@ -157,6 +163,8 @@ export interface ResolvedAigcProvider extends AigcProvider {
   endpoints: EndpointSpec[]
   priority: number
   costPerCall: number
+  costPerKiloToken: number
+  costPerSecond: number
   avgLatencyMs: number
   qualityHint: QualityHint
 }
@@ -197,6 +205,8 @@ function resolveProvider(p: AigcProvider): ResolvedAigcProvider {
     endpoints: p.endpoints ?? [],
     priority: p.priority ?? 100,
     costPerCall: p.costPerCall ?? 0,
+    costPerKiloToken: p.costPerKiloToken ?? 0,
+    costPerSecond: p.costPerSecond ?? 0,
     avgLatencyMs: p.avgLatencyMs ?? 0,
     qualityHint: p.qualityHint ?? 'balanced',
   }
@@ -210,7 +220,7 @@ export function resolveAigcConfig(config: AigcCanvasConfig | undefined): Resolve
     providers.push({
       id: 'stub', name: '', endpoint: 'stub://aigc-backend', apiKey: '', instructions: '',
       auth: { scheme: 'bearer', name: '' }, builtin: true,
-      endpoints: [], priority: 100, costPerCall: 0, avgLatencyMs: 0, qualityHint: 'balanced',
+      endpoints: [], priority: 100, costPerCall: 0, costPerKiloToken: 0, costPerSecond: 0, avgLatencyMs: 0, qualityHint: 'balanced',
     })
   }
   return {

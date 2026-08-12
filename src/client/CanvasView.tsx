@@ -16,10 +16,11 @@
  * (the host notifies after persisting the move).
  */
 import { Component, createElement, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ErrorInfo, type ReactNode, type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent, type ChangeEvent as ReactChangeEvent } from 'react'
-import type { AigcCanvasState, AigcEdge, AigcElement, EdgeRelation } from './api.js'
+import type { AigcCanvasState, AigcEdge, AigcElement, EdgeRelation, SessionCost } from './api.js'
 import { CanvasStore } from './store.js'
 import { CanvasNode } from './CanvasNode.js'
 import { RequestLogPanel } from './RequestLogPanel.js'
+import { fetchSessionCost } from './api.js'
 import css from './canvas.module.css'
 
 /** Translation function type (from the DSH locale system). */
@@ -230,7 +231,23 @@ export function CanvasView({ store, t }: CanvasViewProps): ReactNode {
   const [uploading, setUploading] = useState(false)
   const [showLog, setShowLog] = useState(false)
   const [statusFilter, setStatusFilter] = useState<Set<string>>(new Set(['ready']))
+  const [sessionCost, setSessionCost] = useState<SessionCost | null>(null)
   const surfaceRef = useRef<HTMLElement | null>(null)
+
+  // Poll session cost every 3s (lightweight; cost changes only on provider calls).
+  useEffect(() => {
+    if (state.sessionId === '') return
+    let cancelled = false
+    const poll = async (): Promise<void> => {
+      try {
+        const cost = await fetchSessionCost(state.sessionId)
+        if (!cancelled) setSessionCost(cost)
+      } catch { /* ignore — non-critical */ }
+    }
+    void poll()
+    const timer = setInterval(poll, 3000)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [state.sessionId])
 
   // Track the previous snapshot's element uuids so we can detect when new
   // elements appear (model just placed something) and pan the viewport to
@@ -571,6 +588,9 @@ export function CanvasView({ store, t }: CanvasViewProps): ReactNode {
       createElement('span', { className: css.title }, t('title')),
       createElement('span', { className: css.count }, `${state.elements.length} ${t('elementCount')}`),
       createElement('span', { className: css.count }, `${state.edges.length} ${t('edgeCount')}`),
+      sessionCost !== null && sessionCost.total > 0
+        ? createElement('span', { className: css.costDisplay }, `$${sessionCost.total.toFixed(2)}`)
+        : null,
       createElement('span', { className: css.zoom }, `${Math.round(viewport.scale * 100)}%`),
       createElement('button', {
         type: 'button',

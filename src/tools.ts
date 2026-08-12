@@ -61,6 +61,7 @@ import {
   type RequestSnapshot,
 } from './request-snapshot.js'
 import { logHttpRequest, logMediaEdit, clearLogEntries as clearSessionLog } from './request-log.js'
+import { calculateCallCost, recordCallCost } from './cost-tracker.js'
 import type { Capability, EndpointSpec, ResponseKind } from './endpoint-catalog.js'
 import {
   CAPABILITIES,
@@ -787,6 +788,31 @@ export function registerTools(
         recordRequestSnapshot(sessionId, filePath, snapshot)
       }
 
+      /**
+       * Track the cost of this call based on the provider's cost config.
+       * Per docs/product/04-ux-reliability.md §5 + doc 06 decision 7.
+       */
+      const trackCost = (responseText: string | undefined): void => {
+        let usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined
+        if (responseText !== undefined) {
+          try {
+            const parsed = JSON.parse(responseText) as { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }
+            usage = parsed.usage
+          } catch { /* not JSON or no usage field — usage stays undefined */ }
+        }
+        const cost = calculateCallCost(
+          {
+            costPerCall: provider.costPerCall,
+            costPerKiloToken: provider.costPerKiloToken,
+            costPerSecond: provider.costPerSecond,
+          },
+          { usage, durationSeconds: requestDurationMs / 1000 },
+        )
+        // Derive capability from the provider's endpoint catalog (when available).
+        const spec = findEndpointSpec(provider.endpoints, args.path, method)
+        recordCallCost(sessionId, provider.id, spec?.capability, cost)
+      }
+
       if (!result.ok) {
         logHttpRequest(sessionId, provider, { method, path: args.path, headers: args.headers, query: args.query, body }, { ok: false, status: result.status, contentType: result.contentType, kind: 'text', error: result.text }, requestDurationMs, undefined, undefined)
         return {
@@ -836,6 +862,7 @@ export function registerTools(
               }
               const filePath = await saveResponseToSession(extracted.bytes, extracted.ext, sessionId, cwd)
               recordSnapshot(filePath, extracted.bytes.byteLength, 'image')
+              trackCost(result.text)
               logHttpRequest(sessionId, provider, { method, path: args.path, headers: args.headers, query: args.query, body }, { ok: true, status: result.status, contentType: extracted.contentType, kind: 'image' }, requestDurationMs, filePath, extracted.bytes.byteLength)
               return {
                 ok: true,
@@ -848,6 +875,7 @@ export function registerTools(
             }
           }
           if (result.text.length <= INLINE_TEXT_CAP) {
+            trackCost(result.text)
             logHttpRequest(sessionId, provider, { method, path: args.path, headers: args.headers, query: args.query, body }, { ok: true, status: result.status, contentType: result.contentType, kind: result.kind, text: result.text }, requestDurationMs, undefined, undefined)
             return {
               ok: true,
@@ -864,6 +892,7 @@ export function registerTools(
           const preview = result.text.slice(0, INLINE_TEXT_CAP)
           const size = Buffer.byteLength(result.text)
           recordSnapshot(filePath, size, result.kind)
+          trackCost(result.text)
           logHttpRequest(sessionId, provider, { method, path: args.path, headers: args.headers, query: args.query, body }, { ok: true, status: result.status, contentType: result.contentType, kind: result.kind, text: preview }, requestDurationMs, filePath, size)
           return {
             ok: true,
@@ -883,6 +912,7 @@ export function registerTools(
           }
           const filePath = await saveResponseToSession(result.bytes, ext, sessionId, cwd)
           recordSnapshot(filePath, result.size, result.kind)
+          trackCost(undefined)
           logHttpRequest(sessionId, provider, { method, path: args.path, headers: args.headers, query: args.query, body }, { ok: true, status: result.status, contentType: result.contentType, kind: result.kind }, requestDurationMs, filePath, result.size)
           return {
             ok: true,

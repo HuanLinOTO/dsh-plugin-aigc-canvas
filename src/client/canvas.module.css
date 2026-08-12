@@ -44,6 +44,14 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
+/* Cost display in the header (per docs/product/04-ux-reliability.md §5). */
+.costDisplay {
+  flex: none;
+  font: var(--dsw-font-xxxs-11);
+  color: #4caf50;
+  font-variant-numeric: tabular-nums;
+}
+
 .zoom {
   flex: none;
   min-width: 36px;

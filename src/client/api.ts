@@ -222,3 +222,18 @@ export function fetchRequestLog(sessionId: string, signal?: AbortSignal): Promis
 export function clearRequestLog(sessionId: string, signal?: AbortSignal): Promise<{ ok: boolean }> {
   return call<{ ok: boolean }>('logs.clear', { sessionId }, signal)
 }
+
+// ── Cost tracking (per docs/product/04-ux-reliability.md §5) ─────────────
+
+/** Per-session cost breakdown. */
+export interface SessionCost {
+  total: number
+  byProvider: Record<string, number>
+  byCapability: Record<string, number>
+  callCount: number
+}
+
+/** Fetch the per-session cost summary (for the canvas header). */
+export function fetchSessionCost(sessionId: string, signal?: AbortSignal): Promise<SessionCost> {
+  return call<SessionCost>('cost.get', { sessionId }, signal)
+}

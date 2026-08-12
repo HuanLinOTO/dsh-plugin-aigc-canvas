@@ -21,6 +21,7 @@ import { AigcError } from '../src/wire.js'
 import type { ResolvedAigcProvider } from '../src/config.js'
 import type { EndpointSpec } from '../src/endpoint-catalog.js'
 import { getLogEntries, clearLogEntries, redactSecrets, type RequestLogEntry } from '../src/request-log.js'
+import { calculateCallCost, recordCallCost, getSessionCost, clearSessionCost } from '../src/cost-tracker.js'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 function execFor(sessionId: string): ToolRunContext {
@@ -56,13 +57,13 @@ function mockCtx(): MockTools {
 const STUB_PROVIDER: ResolvedAigcProvider = {
   id: 'stub', name: '', endpoint: 'stub://aigc-backend', apiKey: '', instructions: '',
   auth: { scheme: 'bearer', name: '' }, builtin: true,
-  endpoints: [], priority: 100, costPerCall: 0, avgLatencyMs: 0, qualityHint: 'balanced',
+  endpoints: [], priority: 100, costPerCall: 0, costPerKiloToken: 0, costPerSecond: 0, avgLatencyMs: 0, qualityHint: 'balanced',
 }
 
 const REAL_PROVIDER: ResolvedAigcProvider = {
   id: 'real', name: 'Real API', endpoint: 'https://example.com', apiKey: 'sk-test', instructions: 'docs...',
   auth: { scheme: 'bearer', name: '' }, builtin: false,
-  endpoints: [], priority: 100, costPerCall: 0, avgLatencyMs: 0, qualityHint: 'balanced',
+  endpoints: [], priority: 100, costPerCall: 0, costPerKiloToken: 0, costPerSecond: 0, avgLatencyMs: 0, qualityHint: 'balanced',
 }
 
 function providerInfoList(providers: readonly ResolvedAigcProvider[]): readonly ProviderInfo[] {
@@ -1565,6 +1566,62 @@ describe('request log', () => {
     expect(getLogEntries('s1')).toHaveLength(1)
     expect(getLogEntries('s2')).toHaveLength(1)
     expect(getLogEntries('s1')[0]!.path).toBe('/v1/images/generations')
+  })
+})
+
+// ── Cost tracking (per docs/product/04-ux-reliability.md §5) ───────────────
+describe('cost tracking', () => {
+  beforeEach(() => {
+    clearSessionCost('s1')
+  })
+
+  it('calculateCallCost uses costPerCall by default', () => {
+    const cost = calculateCallCost({ costPerCall: 0.02 }, {})
+    expect(cost).toBe(0.02)
+  })
+
+  it('calculateCallCost uses costPerKiloToken when usage.total_tokens is present', () => {
+    const cost = calculateCallCost(
+      { costPerCall: 0.02, costPerKiloToken: 0.01 },
+      { usage: { total_tokens: 500 } },
+    )
+    // 500 tokens / 1000 * $0.01 = $0.005
+    expect(cost).toBeCloseTo(0.005, 5)
+  })
+
+  it('calculateCallCost uses costPerSecond when durationSeconds is present', () => {
+    const cost = calculateCallCost(
+      { costPerCall: 0.02, costPerSecond: 0.001 },
+      { durationSeconds: 10 },
+    )
+    // 10s * $0.001 = $0.01
+    expect(cost).toBeCloseTo(0.01, 5)
+  })
+
+  it('calculateCallCost returns 0 when no cost config', () => {
+    expect(calculateCallCost({}, {})).toBe(0)
+  })
+
+  it('recordCallCost accumulates by provider + capability', () => {
+    recordCallCost('s1', 'volcano', 't2i', 0.02)
+    recordCallCost('s1', 'volcano', 't2v', 0.15)
+    recordCallCost('s1', 'openai', 'tts', 0.06)
+    const sc = getSessionCost('s1')
+    expect(sc.total).toBeCloseTo(0.23, 5)
+    expect(sc.callCount).toBe(3)
+    expect(sc.byProvider.volcano).toBeCloseTo(0.17, 5)
+    expect(sc.byProvider.openai).toBeCloseTo(0.06, 5)
+    expect(sc.byCapability.t2i).toBeCloseTo(0.02, 5)
+    expect(sc.byCapability.t2v).toBeCloseTo(0.15, 5)
+    expect(sc.byCapability.tts).toBeCloseTo(0.06, 5)
+  })
+
+  it('recordCallCost ignores zero/negative costs', () => {
+    recordCallCost('s1', 'stub', 't2i', 0)
+    recordCallCost('s1', 'stub', 't2i', -1)
+    const sc = getSessionCost('s1')
+    expect(sc.total).toBe(0)
+    expect(sc.callCount).toBe(0)
   })
 })
 

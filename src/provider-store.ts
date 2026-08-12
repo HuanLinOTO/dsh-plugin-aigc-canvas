@@ -76,6 +76,8 @@ export class ProviderStore {
         endpoints: p.endpoints ?? [],
         priority: p.priority ?? 100,
         costPerCall: p.costPerCall ?? 0,
+        costPerKiloToken: p.costPerKiloToken ?? 0,
+        costPerSecond: p.costPerSecond ?? 0,
         avgLatencyMs: p.avgLatencyMs ?? 0,
         qualityHint: p.qualityHint ?? 'balanced',
       }
@@ -121,6 +123,8 @@ export class ProviderStore {
       endpoints: provider.endpoints ?? [],
       priority: provider.priority ?? 100,
       costPerCall: provider.costPerCall ?? 0,
+      costPerKiloToken: provider.costPerKiloToken ?? 0,
+      costPerSecond: provider.costPerSecond ?? 0,
       avgLatencyMs: provider.avgLatencyMs ?? 0,
       qualityHint: provider.qualityHint ?? 'balanced',
     }
@@ -153,6 +157,8 @@ export class ProviderStore {
       endpoints: provider.endpoints ?? existing.endpoints,
       priority: provider.priority ?? existing.priority,
       costPerCall: provider.costPerCall ?? existing.costPerCall,
+      costPerKiloToken: provider.costPerKiloToken ?? existing.costPerKiloToken,
+      costPerSecond: provider.costPerSecond ?? existing.costPerSecond,
       avgLatencyMs: provider.avgLatencyMs ?? existing.avgLatencyMs,
       qualityHint: provider.qualityHint ?? existing.qualityHint,
     }
@@ -253,6 +259,8 @@ function loadPersistedSync(dataPath: string): readonly AigcProvider[] | null {
         ...(Array.isArray(rec.endpoints) ? { endpoints: rec.endpoints as EndpointSpec[] } : {}),
         ...(typeof rec.priority === 'number' ? { priority: rec.priority } : {}),
         ...(typeof rec.costPerCall === 'number' ? { costPerCall: rec.costPerCall } : {}),
+        ...(typeof rec.costPerKiloToken === 'number' ? { costPerKiloToken: rec.costPerKiloToken } : {}),
+        ...(typeof rec.costPerSecond === 'number' ? { costPerSecond: rec.costPerSecond } : {}),
         ...(typeof rec.avgLatencyMs === 'number' ? { avgLatencyMs: rec.avgLatencyMs } : {}),
         ...(typeof rec.qualityHint === 'string' ? { qualityHint: rec.qualityHint as AigcProvider['qualityHint'] } : {}),
       })

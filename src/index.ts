@@ -43,6 +43,7 @@ import { isTrustedApiRequest } from './trust-fence.js'
 import { registerTools, type ProviderInfo } from './tools.js'
 import { AigcError, readJsonBody, requireString, writeError, writeJson, writeOk } from './wire.js'
 import { getLogEntries, clearLogEntries, type RequestLogEntry } from './request-log.js'
+import { getSessionCost, clearSessionCost, type SessionCost } from './cost-tracker.js'
 
 export { Config }
 export type { AigcCanvasConfig, AigcProvider, ResolvedAigcConfig, ResolvedAigcProvider }
@@ -256,6 +257,15 @@ function buildApi(
     'logs.clear': (payload) => {
       const sessionId = requireString(payload, 'sessionId')
       clearLogEntries(sessionId)
+      return { ok: true }
+    },
+    'cost.get': (payload) => {
+      const sessionId = requireString(payload, 'sessionId')
+      return getSessionCost(sessionId)
+    },
+    'cost.clear': (payload) => {
+      const sessionId = requireString(payload, 'sessionId')
+      clearSessionCost(sessionId)
       return { ok: true }
     },
   }

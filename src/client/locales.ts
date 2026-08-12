@@ -123,6 +123,59 @@ export type AigcKey =
   | 'statusDraft'
   | 'statusRejected'
   | 'statusArchived'
+  // Compare view (per docs/product/04-ux-reliability.md §2)
+  | 'compareButton'
+  | 'compareTitle'
+  | 'compareClose'
+  | 'compareSelectWinner'
+  | 'compareRejectAll'
+  | 'compareCancelSelection'
+  | 'compareSeed'
+  | 'compareCost'
+  | 'compareDuration'
+  | 'comparePrompt'
+  | 'compareNoMedia'
+  | 'compareNotEnough'
+  | 'compareTooMany'
+  | 'compareClearSelection'
+  | 'compareNSelected'
+  // Provider settings — endpoint catalog editor (per docs/product/03-provider-catalog.md §5)
+  | 'row.priority'
+  | 'row.qualityHint'
+  | 'row.costPerCall'
+  | 'row.costPerKiloToken'
+  | 'row.costPerSecond'
+  | 'row.priorityDesc'
+  | 'row.qualityHintDesc'
+  | 'row.costPerCallDesc'
+  | 'row.costPerKiloTokenDesc'
+  | 'row.costPerSecondDesc'
+  | 'row.endpoints'
+  | 'row.endpointsDesc'
+  | 'row.endpointsEmpty'
+  | 'row.addEndpoint'
+  | 'row.editEndpoint'
+  | 'row.removeEndpoint'
+  | 'row.endpointPath'
+  | 'row.endpointMethod'
+  | 'row.endpointCapability'
+  | 'row.endpointResponseKind'
+  | 'row.endpointResponsePath'
+  | 'row.endpointAcceptsCanvasRef'
+  | 'row.endpointNotes'
+  | 'row.endpointParams'
+  | 'row.endpointParamsEmpty'
+  | 'row.endpointParamName'
+  | 'row.endpointParamType'
+  | 'row.endpointParamRequired'
+  | 'row.endpointParamDefault'
+  | 'row.endpointAddParam'
+  | 'row.endpointRemoveParam'
+  | 'row.endpointCancel'
+  | 'row.endpointSave'
+  | 'row.autoDetect'
+  | 'row.autoDetectTitle'
+  | 'row.autoDetectPrompt'
 
 export const zh: Record<AigcKey, string> = {
   tabTitle: 'AIGC 画布',
@@ -233,6 +286,57 @@ export const zh: Record<AigcKey, string> = {
   statusDraft: '草稿',
   statusRejected: '否决',
   statusArchived: '归档',
+  compareButton: '对比',
+  compareTitle: '对比视图',
+  compareClose: '关闭',
+  compareSelectWinner: '选为 winner',
+  compareRejectAll: '全部否决',
+  compareCancelSelection: '取消选择',
+  compareSeed: 'seed',
+  compareCost: '成本',
+  compareDuration: '耗时',
+  comparePrompt: '提示词',
+  compareNoMedia: '该元素无可显示的媒体',
+  compareNotEnough: '请选择 2-4 个元素进行对比',
+  compareTooMany: '最多只能同时对比 4 个元素',
+  compareClearSelection: '清除选择',
+  compareNSelected: '已选 {n} 个',
+  'row.priority': '优先级',
+  'row.qualityHint': '质量',
+  'row.costPerCall': '单次成本 ($)',
+  'row.costPerKiloToken': '千 token 成本 ($)',
+  'row.costPerSecond': '每秒成本 ($)',
+  'row.priorityDesc': '数字越小优先级越高（默认 100）。多 provider 同 capability 时按此排序',
+  'row.qualityHintDesc': 'fast / balanced / quality，供 Agent 选择快速或高质量 provider',
+  'row.costPerCallDesc': '单次调用成本（美元），用于成本追踪',
+  'row.costPerKiloTokenDesc': '按 token 计费时（chat / transcribe）的千 token 成本',
+  'row.costPerSecondDesc': '按秒计费时（t2v / tts）的每秒成本',
+  'row.endpoints': 'Endpoints',
+  'row.endpointsDesc': '结构化能力表。Agent 通过 aigc_get_provider_info 读取，无需解析自然语言',
+  'row.endpointsEmpty': '暂无 endpoint。点击下方"自动探测"或"+ 添加 endpoint"',
+  'row.addEndpoint': '+ 添加 endpoint',
+  'row.editEndpoint': '编辑 endpoint',
+  'row.removeEndpoint': '删除',
+  'row.endpointPath': 'Path',
+  'row.endpointMethod': 'Method',
+  'row.endpointCapability': 'Capability',
+  'row.endpointResponseKind': '响应类型',
+  'row.endpointResponsePath': '响应字段路径',
+  'row.endpointAcceptsCanvasRef': '支持 $base64 占位符',
+  'row.endpointNotes': '备注',
+  'row.endpointParams': '参数',
+  'row.endpointParamsEmpty': '暂无参数',
+  'row.endpointParamName': '名称',
+  'row.endpointParamType': '类型',
+  'row.endpointParamRequired': '必填',
+  'row.endpointParamDefault': '默认值',
+  'row.endpointAddParam': '+ 添加参数',
+  'row.endpointRemoveParam': '删除参数',
+  'row.endpointCancel': '取消',
+  'row.endpointSave': '保存',
+  'row.autoDetect': '自动探测',
+  'row.autoDetectTitle': '让 Agent 用 aigc_probe_endpoint 自动探测响应格式',
+  'row.autoDetectPrompt': '请帮我自动探测 AIGC 供应商「{name}」(id: {id}) 的 endpoint 响应格式：对每个未配置响应类型的 endpoint 调用 aigc_probe_endpoint（会发送一次最小测试请求，apiKey 自动附加），把探测到的 response.kind + response.path 通过 aigc_provider_set_endpoints 保存到 EndpointSpec。如果该 provider 还没有任何 endpoint，请先用 aigc_http_request 探测常见的 endpoint（如 /v1/images/generations、/v1/videos/generations、/v1/audio/speech），再用 aigc_probe_endpoint 探测响应格式。',
 }
 
 export const en: Record<AigcKey, string> = {
@@ -344,4 +448,55 @@ export const en: Record<AigcKey, string> = {
   statusDraft: 'Draft',
   statusRejected: 'Rejected',
   statusArchived: 'Archived',
+  compareButton: 'Compare',
+  compareTitle: 'Compare view',
+  compareClose: 'Close',
+  compareSelectWinner: 'Select as winner',
+  compareRejectAll: 'Reject all',
+  compareCancelSelection: 'Cancel selection',
+  compareSeed: 'seed',
+  compareCost: 'cost',
+  compareDuration: 'duration',
+  comparePrompt: 'Prompt',
+  compareNoMedia: 'No media to display for this element',
+  compareNotEnough: 'Select 2-4 elements to compare',
+  compareTooMany: 'You can compare at most 4 elements at once',
+  compareClearSelection: 'Clear selection',
+  compareNSelected: '{n} selected',
+  'row.priority': 'Priority',
+  'row.qualityHint': 'Quality',
+  'row.costPerCall': 'Cost per call ($)',
+  'row.costPerKiloToken': 'Cost per 1k tokens ($)',
+  'row.costPerSecond': 'Cost per second ($)',
+  'row.priorityDesc': 'Smaller = higher priority (default 100). When multiple providers serve the same capability, they are sorted by this',
+  'row.qualityHintDesc': 'fast / balanced / quality — lets the agent pick fast vs. quality providers',
+  'row.costPerCallDesc': 'Cost per call in USD (for cost tracking)',
+  'row.costPerKiloTokenDesc': 'Per-1k-token cost in USD (for chat / transcribe cost tracking)',
+  'row.costPerSecondDesc': 'Per-second cost in USD (for t2v / tts cost tracking)',
+  'row.endpoints': 'Endpoints',
+  'row.endpointsDesc': 'Structured capability catalog. The agent reads it via aigc_get_provider_info — no natural-language parsing needed',
+  'row.endpointsEmpty': 'No endpoints yet. Click "Auto-detect" or "+ Add endpoint" below',
+  'row.addEndpoint': '+ Add endpoint',
+  'row.editEndpoint': 'Edit endpoint',
+  'row.removeEndpoint': 'Remove',
+  'row.endpointPath': 'Path',
+  'row.endpointMethod': 'Method',
+  'row.endpointCapability': 'Capability',
+  'row.endpointResponseKind': 'Response kind',
+  'row.endpointResponsePath': 'Response field path',
+  'row.endpointAcceptsCanvasRef': 'Accepts $base64 placeholder',
+  'row.endpointNotes': 'Notes',
+  'row.endpointParams': 'Parameters',
+  'row.endpointParamsEmpty': 'No parameters',
+  'row.endpointParamName': 'Name',
+  'row.endpointParamType': 'Type',
+  'row.endpointParamRequired': 'Required',
+  'row.endpointParamDefault': 'Default',
+  'row.endpointAddParam': '+ Add parameter',
+  'row.endpointRemoveParam': 'Remove parameter',
+  'row.endpointCancel': 'Cancel',
+  'row.endpointSave': 'Save',
+  'row.autoDetect': 'Auto-detect',
+  'row.autoDetectTitle': 'Ask the agent to auto-detect the response shape via aigc_probe_endpoint',
+  'row.autoDetectPrompt': 'Please auto-detect the response shape for the AIGC provider "{name}" (id: {id}): for every endpoint whose response.kind is not yet set, call aigc_probe_endpoint (it sends ONE minimal test request — apiKey is attached automatically) and save the detected response.kind + response.path into the EndpointSpec via aigc_provider_set_endpoints. If this provider has no endpoints at all yet, first probe common endpoints with aigc_http_request (e.g. /v1/images/generations, /v1/videos/generations, /v1/audio/speech), then probe the response shape with aigc_probe_endpoint.',
 }

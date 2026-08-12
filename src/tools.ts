@@ -94,6 +94,16 @@ import {
   type StepOverride,
   type StepOverrides,
 } from './pipeline.js'
+import {
+  BUILTIN_TEMPLATES,
+  getTemplate as getTemplateSpec,
+  instantiateTemplateSpec,
+  listTemplates,
+  saveTemplate,
+  type ParamType,
+  type TemplateSpec,
+  type TemplateSummary,
+} from './pipeline-templates.js'
 
 /** Maximum length of a prompt title (derived from the prompt text). */
 const TITLE_MAX = 80
@@ -3210,6 +3220,370 @@ export function registerTools(
           step_count: s.step_count,
           completed_count: s.completed_count,
         })),
+      }
+    },
+  }))
+
+  // ══ Pipeline template tools (per docs/product/02-pipeline.md §7) ══════════
+  // Templates are declarative PipelineSpec skeletons with {{param}} placeholders,
+  // stored under ~/.dsh/aigc-canvas/templates/<name>.json. Five built-in
+  // templates ship with the plugin (simple-t2i, simple-t2v, first-last-frame-video,
+  // 30s-product-ad, multi-angle-product). These 4 tools list / fetch / instantiate
+  // / save templates — instantiation calls the existing PipelineEngine.start() +
+  // run() so the runtime path is identical to aigc_pipeline_run.
+
+  // ── aigc_template_list ────────────────────────────────────────────────────
+  register(defineTool({
+    name: 'aigc_template_list',
+    description:
+      'List all available pipeline templates (per docs/product/02-pipeline.md §7). '
+      + 'Returns built-in templates (shipped with the plugin) PLUS user-saved templates from ~/.dsh/aigc-canvas/templates/. '
+      + 'A user-saved template shadows a built-in of the same name. '
+      + 'Each entry shows: name, description, source ("built-in" or "user"), param_count, step_count, and the declared params (name/type/required). '
+      + 'Use aigc_template_get to fetch one template\'s full spec, or aigc_template_instantiate to start a pipeline from a template.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          templates: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                name: { type: 'string', required: true },
+                description: { type: 'string', required: true },
+                source: { type: 'string', required: true, enum: ['built-in', 'user'] },
+                param_count: { type: 'integer', required: true },
+                step_count: { type: 'integer', required: true },
+                params: {
+                  type: 'array',
+                  required: true,
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      name: { type: 'string', required: true },
+                      type: { type: 'string', required: true, enum: ['string', 'number', 'boolean'] as const },
+                      required: { type: 'boolean', required: true },
+                    },
+                  },
+                  description: 'Declared params (call aigc_template_get for full details including defaults + descriptions).',
+                },
+              },
+            },
+          },
+        },
+      },
+      render: textRender((v: { templates: Array<{ name: string; description: string; source: string; param_count: number; step_count: number }> }) => {
+        if (v.templates.length === 0) return 'No pipeline templates available.'
+        const lines = v.templates.map(t => `  [${t.source}] ${t.name}  (${t.step_count} steps, ${t.param_count} params)  ${t.description}`)
+        return `Pipeline templates (${v.templates.length}):\n${lines.join('\n')}\nCall aigc_template_instantiate with one name + params to start a pipeline.`
+      }),
+    },
+    async execute() {
+      const templates = await listTemplates()
+      return {
+        templates: templates.map(t => ({
+          name: t.name,
+          description: t.description,
+          source: t.source,
+          param_count: t.param_count,
+          step_count: t.step_count,
+          params: t.params.map(p => ({ name: p.name, type: p.type, required: p.required })),
+        })),
+      }
+    },
+  }))
+
+  // ── aigc_template_get ─────────────────────────────────────────────────────
+  register(defineTool({
+    name: 'aigc_template_get',
+    description:
+      'Fetch one template\'s full spec + param declarations (per docs/product/02-pipeline.md §7). '
+      + 'Use this when you need the exact StepSpec[] shape to understand what the template does, or to read '
+      + 'the param defaults + descriptions before calling aigc_template_instantiate. '
+      + 'The returned `spec` is the raw PipelineSpec (with {{param}} placeholders still in place) — '
+      + 'pass it to aigc_template_instantiate (NOT aigc_pipeline_run, which would skip param validation).',
+    parameters: {
+      name: {
+        type: 'string',
+        required: true,
+        description: 'The template name (from aigc_template_list). Built-ins: '
+          + BUILTIN_TEMPLATES.map(t => t.name).join(', ') + '.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          name: { type: 'string', required: true },
+          description: { type: 'string', required: true },
+          source: { type: 'string', required: true, enum: ['built-in', 'user'] },
+          params: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                name: { type: 'string', required: true },
+                type: { type: 'string', required: true, enum: ['string', 'number', 'boolean'] as const },
+                required: { type: 'boolean', required: true },
+                default: { type: 'string', description: 'Default value (stringified; omitted when no default).' },
+                description: { type: 'string' },
+              },
+            },
+          },
+          spec: { type: 'json', required: true, description: 'The full PipelineSpec (with {{param}} placeholders).' },
+        },
+      },
+      render: textRender((v: { name: string; description: string; source: string; params: Array<{ name: string; required: boolean; default?: string }>; spec: { steps: Array<{ id: string; capability?: string; operation?: string }> } }) => {
+        const paramList = v.params.map(p => `${p.name}${p.required ? '*' : ''}${p.default !== undefined ? `="${p.default}"` : ''}`).join(', ')
+        const stepList = v.spec.steps.map(s => `    - ${s.id}${s.capability !== undefined ? ` (${s.capability})` : s.operation !== undefined ? ` (${s.operation})` : ''}`).join('\n')
+        return `Template [${v.source}] "${v.name}": ${v.description}\n  params: ${paramList || '(none)'}\n  steps (${v.spec.steps.length}):\n${stepList}`
+      }),
+    },
+    async execute(args: { name: string }) {
+      if (typeof args.name !== 'string' || args.name === '') {
+        throw new AigcError('bad-request', 'name is required')
+      }
+      const tpl = await getTemplateSpec(args.name)
+      return {
+        name: tpl.name,
+        description: tpl.description,
+        source: tpl.source,
+        params: tpl.params.map(p => ({
+          name: p.name,
+          type: p.type,
+          required: p.required,
+          ...(p.default !== undefined ? { default: String(p.default) } : {}),
+          ...(p.description !== undefined ? { description: p.description } : {}),
+        })),
+        spec: tpl.spec,
+      }
+    },
+  }))
+
+  // ── aigc_template_instantiate ─────────────────────────────────────────────
+  register(defineTool({
+    name: 'aigc_template_instantiate',
+    description:
+      'Instantiate a pipeline template by name (per docs/product/02-pipeline.md §7). '
+      + 'Validates the caller-supplied params against the template\'s ParamSpec declarations (required params must be present; unknown params are rejected), '
+      + 'substitutes {{param}} placeholders in every spec string with the param values, then starts the pipeline via the same PipelineEngine.start() + run() path '
+      + 'that aigc_pipeline_run uses — so progress notifications, canvas placement, edge wiring, breakpoint resume, and cancel all work identically. '
+      + 'Use aigc_template_list to see available templates + their param names. Use aigc_template_get to see the full spec. '
+      + 'Typical flow: user says "做个 30 秒 iPhone 17 广告片，旁白是\'未来已来\'" → call this tool with template="30s-product-ad", '
+      + 'params={product_name:"iPhone 17", tagline:"未来已来"} → receive pipeline_id + progress notifications → final video on the canvas.',
+    parameters: {
+      name: {
+        type: 'string',
+        required: true,
+        description: 'The template name (built-in or user-saved). See aigc_template_list.',
+      },
+      params: {
+        type: 'json',
+        description:
+          'Template param values keyed by name. Required params MUST be present (else the call rejects with a bad-request error listing the missing one). '
+          + 'Optional params with defaults are filled automatically when omitted. '
+          + 'Example for 30s-product-ad: { product_name: "iPhone 17", tagline: "未来已来", voice: "male_en" }.',
+      },
+      async: {
+        type: 'boolean',
+        description:
+          'true (default) = return immediately with pipeline_id; progress flows via agent.inject (preferred for long pipelines). '
+          + 'false = block this tool call until the pipeline completes or fails (use for short templates like simple-t2i).',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          pipeline_id: { type: 'string', required: true, description: 'The pipeline id (use with aigc_pipeline_status / resume / cancel).' },
+          template_name: { type: 'string', required: true, description: 'The template name that was instantiated.' },
+          name: { type: 'string', required: true, description: 'The resolved pipeline name (after {{param}} substitution).' },
+          status: { type: 'string', required: true, enum: ['running', 'completed', 'failed', 'cancelled'] },
+          steps: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                status: { type: 'string', required: true, enum: ['pending', 'running', 'completed', 'failed', 'skipped'] },
+                element_path: { type: 'string' },
+                error: { type: 'string' },
+                started_at: { type: 'integer' },
+                finished_at: { type: 'integer' },
+              },
+            },
+          },
+        },
+      },
+      render: textRender((v: { pipeline_id: string; template_name: string; name: string; status: string; steps: Array<{ id: string; status: string; element_path?: string }> }) => {
+        const completed = v.steps.filter(s => s.status === 'completed').length
+        const summary = v.steps.map(s => `  ${s.status === 'completed' ? '✓' : s.status === 'failed' ? '✗' : s.status === 'running' ? '⏳' : '○'} ${s.id}${s.element_path !== undefined ? ` → ${s.element_path}` : ''}`)
+        return `Instantiated template "${v.template_name}" → pipeline "${v.name}" (${v.pipeline_id}): ${v.status} — ${completed}/${v.steps.length} done.\n${summary.join('\n')}`
+      }),
+    },
+    async execute(args: { name: unknown; params?: unknown; async?: unknown }, exec) {
+      exec.signal.throwIfAborted()
+      if (typeof args.name !== 'string' || args.name === '') {
+        throw new AigcError('bad-request', 'name is required (the template name to instantiate)')
+      }
+      let callerParams: Record<string, unknown> | undefined
+      if (args.params !== undefined) {
+        if (args.params === null || typeof args.params !== 'object' || Array.isArray(args.params)) {
+          throw new AigcError('bad-request', 'params must be a JSON object of {param_name: value}')
+        }
+        callerParams = args.params as Record<string, unknown>
+      }
+      // Load the template, validate + resolve params, substitute placeholders.
+      const tpl = await getTemplateSpec(args.name)
+      const resolvedSpec = instantiateTemplateSpec(tpl, callerParams)
+      const sessionId = sessionIdOf(exec)
+      const isAsync = typeof args.async === 'boolean' ? args.async : true
+      // Hand the resolved spec to the engine. We pass NO params here because
+      // substitution is already done — pipelineEngine.start would otherwise
+      // re-run substitution (harmless, but redundant and could mask bugs).
+      const state = await pipelineEngine.start(sessionId, resolvedSpec)
+      if (isAsync) {
+        // Fire-and-forget: run in the background. Errors are caught and
+        // recorded into state.status (the engine never throws out of run()).
+        const abort = new AbortController()
+        void pipelineEngine.run(state, abort).catch(() => {
+          // The engine records failures into state; nothing to do here.
+        })
+        const projection = pipelineStateProjection(state)
+        return { ...projection, template_name: tpl.name }
+      }
+      // Sync mode: block until completion (mirrors aigc_pipeline_run).
+      const abort = new AbortController()
+      const onToolAbort = () => abort.abort(new Error('tool call aborted'))
+      exec.signal.addEventListener('abort', onToolAbort, { once: true })
+      try {
+        const finalState = await pipelineEngine.run(state, abort)
+        const projection = pipelineStateProjection(finalState)
+        return { ...projection, template_name: tpl.name }
+      } finally {
+        exec.signal.removeEventListener('abort', onToolAbort)
+      }
+    },
+  }))
+
+  // ── aigc_template_save ────────────────────────────────────────────────────
+  register(defineTool({
+    name: 'aigc_template_save',
+    description:
+      'Save the current session\'s pipeline as a reusable template (per docs/product/02-pipeline.md §7). '
+      + 'Loads the pipeline\'s resolved spec (the spec AFTER {{param}} substitution was applied at run time) and persists it as a TemplateSpec at '
+      + '~/.dsh/aigc-canvas/templates/<name>.json so it shows up in aigc_template_list / aigc_template_get / aigc_template_instantiate. '
+      + 'The saved spec has placeholders BAKED IN (concrete values from the original run), so you typically want to edit the JSON file to re-introduce '
+      + '{{param}} placeholders + declare them in the params array before reusing. '
+      + 'A user-saved template with the same name as a built-in shadows the built-in (the disk copy wins at read time). '
+      + 'Optionally pass an explicit `params` array to declare template params upfront (the agent can document the placeholders it intends to re-introduce).',
+    parameters: {
+      pipeline_id: {
+        type: 'string',
+        required: true,
+        description: 'The pipeline id (from aigc_pipeline_run / aigc_template_instantiate) whose resolved spec should be saved.',
+      },
+      name: {
+        type: 'string',
+        required: true,
+        description: 'The template name (lowercase-hyphenated, e.g. "my-product-ad"). Used as the filename: <name>.json. '
+          + 'Overwrites an existing template with the same name.',
+      },
+      description: {
+        type: 'string',
+        description: 'Template description (what it does). Defaults to the pipeline\'s name.',
+      },
+      params: {
+        type: 'json',
+        description:
+          'Optional ParamSpec[] array to declare template params upfront. '
+          + 'Shape: [{ name: string, type: "string"|"number"|"boolean", required: boolean, default?: string|number|boolean, description?: string }]. '
+          + 'Defaults to an empty array (the saved spec has no declared params — add them later by editing the JSON file). '
+          + 'NOTE: this does NOT re-introduce {{param}} placeholders into the spec — the spec is saved as the resolved (post-substitution) version.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          name: { type: 'string', required: true, description: 'The saved template name.' },
+          source: { type: 'string', required: true, enum: ['user'] },
+          file_path: { type: 'string', required: true, description: 'Absolute path of the saved template JSON file.' },
+          step_count: { type: 'integer', required: true, description: 'Number of steps in the saved spec.' },
+          param_count: { type: 'integer', required: true, description: 'Number of declared params (0 when none provided).' },
+        },
+      },
+      render: textRender((v: { name: string; file_path: string; step_count: number; param_count: number }) =>
+        `Saved template "${v.name}" → ${v.file_path} (${v.step_count} steps, ${v.param_count} declared params). It now appears in aigc_template_list.`,
+      ),
+    },
+    async execute(args: { pipeline_id: string; name: string; description?: string; params?: unknown }, exec) {
+      exec.signal.throwIfAborted()
+      if (typeof args.pipeline_id !== 'string' || args.pipeline_id === '') {
+        throw new AigcError('bad-request', 'pipeline_id is required')
+      }
+      if (typeof args.name !== 'string' || args.name === '') {
+        throw new AigcError('bad-request', 'name is required')
+      }
+      // Load the pipeline's resolved spec from the engine (in-memory or disk).
+      const sessionId = sessionIdOf(exec)
+      const state = await pipelineEngine.status(sessionId, args.pipeline_id)
+      // Validate + normalize the optional params array.
+      let paramDecls: TemplateSpec['params'] = []
+      if (args.params !== undefined) {
+        if (args.params === null || typeof args.params !== 'object' || !Array.isArray(args.params)) {
+          throw new AigcError('bad-request', 'params must be an array of ParamSpec objects')
+        }
+        paramDecls = (args.params as unknown[]).map((p, i) => {
+          if (p === null || typeof p !== 'object' || Array.isArray(p)) {
+            throw new AigcError('bad-request', `params[${i}] must be a ParamSpec object`)
+          }
+          const o = p as Record<string, unknown>
+          if (typeof o.name !== 'string' || o.name === '') {
+            throw new AigcError('bad-request', `params[${i}].name is required`)
+          }
+          const validTypes: ParamType[] = ['string', 'number', 'boolean']
+          if (typeof o.type !== 'string' || !validTypes.includes(o.type as ParamType)) {
+            throw new AigcError('bad-request', `params[${i}].type must be one of: string, number, boolean`)
+          }
+          if (typeof o.required !== 'boolean') {
+            throw new AigcError('bad-request', `params[${i}].required must be a boolean`)
+          }
+          return {
+            name: o.name,
+            type: o.type as ParamType,
+            required: o.required,
+            ...(o.default !== undefined ? { default: o.default as string | number | boolean } : {}),
+            ...(typeof o.description === 'string' ? { description: o.description } : {}),
+          }
+        })
+      }
+      const template: TemplateSpec = {
+        name: args.name,
+        description: typeof args.description === 'string' ? args.description : state.name,
+        params: paramDecls,
+        spec: state.spec,
+      }
+      const saved = await saveTemplate(template)
+      return {
+        name: saved.name,
+        source: saved.source,
+        file_path: saved.file_path,
+        step_count: template.spec.steps.length,
+        param_count: template.params.length,
       }
     },
   }))

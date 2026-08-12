@@ -468,3 +468,199 @@
   line-height: 22px;
   color: var(--dsw-alias-label-tertiary);
 }
+
+/* ── Structured endpoint catalog editor (per doc 03-provider-catalog.md §5) ─ */
+
+/* A row of fields laid out side-by-side (priority + quality, the three
+ * cost fields, path + method + capability). Wraps on narrow viewports. */
+.fieldRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.fieldRow > .field {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+/* The label row inside .field that also holds a trailing action button
+ * (the "Auto-detect" button on the Endpoints field). */
+.fieldLabelRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.endpointsAutoDetectButton {
+  flex: none;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.endpointsAutoDetectButton:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* The empty-state hint shown when the endpoints list (or a single
+ * endpoint's params list) is empty. */
+.endpointsEmpty {
+  padding: 12px;
+  border: 1px dashed var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+  text-align: center;
+}
+
+/* Container for the list of endpoint cards. */
+.endpointsList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* One endpoint card: outlined on the editor fill, matching the rowCard
+ * chrome but tighter (8px padding, smaller radius). */
+.endpointCard {
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+/* Head row of an endpoint card: shows method + path + capability badge
+ * on the left, remove button on the right. */
+.endpointHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.endpointHeadLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-family: var(--dsw-font-markdown-code-block-small, monospace);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Capability badge: a small pill next to the endpoint path (e.g. "[t2i]"). */
+.endpointCapabilityBadge {
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 14px;
+  font-weight: 500;
+  background: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-label-primary-foreground);
+  letter-spacing: 0.02em;
+}
+
+/* Remove button (×) on an endpoint or param row. */
+.endpointRemoveButton,
+.paramRemoveButton {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+}
+
+.endpointRemoveButton:hover,
+.paramRemoveButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover-danger);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* "+ Add endpoint" / "+ Add parameter" button: a dashed-outline place
+ * card, matching the .addBlockButton aesthetic but tighter. */
+.addEndpointButton {
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 4px 12px;
+  border: 1px dashed var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.addEndpointButton:hover:not(:disabled) {
+  color: var(--dsw-alias-label-primary);
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+/* Parameter table: a grid of name / type / required / default / remove.
+ * The columns are sized so the name + default fields get the most room
+ * (they're the most variable in length); the type + required columns
+ * are fixed-width. */
+.paramsTable {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.paramRow {
+  display: grid;
+  grid-template-columns: 1fr 110px auto 1fr 24px;
+  gap: 6px;
+  align-items: center;
+}
+
+/* "Required" checkbox cell: a tight label + checkbox. */
+.paramRequired {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+}
+
+.paramRequired input[type="checkbox"] {
+  margin: 0;
+}
+
+/* "Accepts $base64" checkbox row: full-width label + checkbox. */
+.fieldRow > input[type="checkbox"] {
+  margin-top: 4px;
+}

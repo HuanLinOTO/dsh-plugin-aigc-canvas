@@ -95,6 +95,87 @@ export interface RuntimeProvider {
   instructions: string
   auth: { scheme: 'bearer' | 'header' | 'query'; name: string }
   builtin: boolean
+  /**
+   * Structured capability catalog (per docs/product/03-provider-catalog.md).
+   * Empty array = legacy auto-sniff + instructions (backward compat).
+   */
+  endpoints?: RuntimeEndpointSpec[]
+  /** Selection priority (smaller = higher; default 100). */
+  priority?: number
+  /** Cost per call in USD (for cost tracking). */
+  costPerCall?: number
+  /** Cost per 1k tokens in USD (chat / transcribe). */
+  costPerKiloToken?: number
+  /** Cost per second of video/audio in USD (t2v / tts). */
+  costPerSecond?: number
+  /** Average latency in ms (host auto-statistic; future use). */
+  avgLatencyMs?: number
+  /** Quality hint: fast / balanced / quality. */
+  qualityHint?: RuntimeQualityHint
+}
+
+/** Quality hint (client-side mirror of the host QualityHint enum). */
+export type RuntimeQualityHint = 'fast' | 'balanced' | 'quality'
+
+/** All QualityHint values as a readonly array (for select dropdowns). */
+export const RUNTIME_QUALITY_HINTS: readonly RuntimeQualityHint[] = ['fast', 'balanced', 'quality'] as const
+
+/** One AIGC capability (client-side mirror of the host Capability enum). */
+export type RuntimeCapability =
+  | 't2i' | 'i2i' | 't2v' | 'i2v' | 'fl2v' | 'ref2v'
+  | 'tts' | 'music' | 'transcribe' | 'edit' | 'chat'
+
+/** All Capability values (for select dropdowns). */
+export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
+  't2i', 'i2i', 't2v', 'i2v', 'fl2v', 'ref2v',
+  'tts', 'music', 'transcribe', 'edit', 'chat',
+] as const
+
+/** Response kind (client-side mirror of the host ResponseKind enum). */
+export type RuntimeResponseKind =
+  | 'b64_json_array' | 'b64_json_field' | 'binary' | 'url_field' | 'json_text'
+
+/** All ResponseKind values (for select dropdowns). */
+export const RUNTIME_RESPONSE_KINDS: readonly RuntimeResponseKind[] = [
+  'b64_json_array', 'b64_json_field', 'binary', 'url_field', 'json_text',
+] as const
+
+/** HTTP method (client-side mirror of the host EndpointSpec.method). */
+export type RuntimeHttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH'
+
+/** All HTTP methods (for select dropdowns). */
+export const RUNTIME_HTTP_METHODS: readonly RuntimeHttpMethod[] = ['GET', 'POST', 'PUT', 'PATCH'] as const
+
+/** One parameter on an endpoint (client-side mirror of ParamSpec). */
+export interface RuntimeParamSpec {
+  name: string
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'array' | 'object' | 'image_ref' | 'video_ref' | 'audio_ref'
+  required: boolean
+  default?: unknown
+  description?: string
+}
+
+/** All parameter types (for select dropdowns). */
+export const RUNTIME_PARAM_TYPES: readonly RuntimeParamSpec['type'][] = [
+  'string', 'number', 'integer', 'boolean', 'array', 'object',
+  'image_ref', 'video_ref', 'audio_ref',
+] as const
+
+/** Response shape declaration (client-side mirror of ResponseSpec). */
+export interface RuntimeResponseSpec {
+  kind: RuntimeResponseKind
+  path?: string
+}
+
+/** One provider endpoint's complete description (client-side mirror of EndpointSpec). */
+export interface RuntimeEndpointSpec {
+  path: string
+  method: RuntimeHttpMethod
+  capability: RuntimeCapability
+  params?: RuntimeParamSpec[]
+  response: RuntimeResponseSpec
+  acceptsCanvasRef?: boolean
+  notes?: string
 }
 
 /** Global settings wire shape. */

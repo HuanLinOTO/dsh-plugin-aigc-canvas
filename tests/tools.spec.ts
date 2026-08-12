@@ -24,6 +24,7 @@ import type { EndpointSpec } from '../src/endpoint-catalog.js'
 import { getLogEntries, clearLogEntries, redactSecrets, type RequestLogEntry } from '../src/request-log.js'
 import { calculateCallCost, recordCallCost, getSessionCost, clearSessionCost } from '../src/cost-tracker.js'
 import { setLibraryDir, resetLibraryDir } from '../src/asset-library.js'
+import { setTemplatesDir, resetTemplatesDir, BUILTIN_TEMPLATES } from '../src/pipeline-templates.js'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 function execFor(sessionId: string): ToolRunContext {
@@ -256,7 +257,7 @@ describe('registerTools (stub provider)', () => {
     await rm(cwd, { recursive: true, force: true })
   })
 
-  it('registers exactly twenty-five tools', () => {
+  it('registers exactly twenty-nine tools', () => {
     expect(Array.from(ctx.registered.keys()).sort()).toEqual([
       'aigc_assess',
       'aigc_canvas_link',
@@ -282,6 +283,10 @@ describe('registerTools (stub provider)', () => {
       'aigc_provider_set_endpoints',
       'aigc_provider_set_instructions',
       'aigc_reroll',
+      'aigc_template_get',
+      'aigc_template_instantiate',
+      'aigc_template_list',
+      'aigc_template_save',
       'aigc_variation',
     ])
   })
@@ -1160,8 +1165,8 @@ describe('registerTools (stub provider)', () => {
     }
   })
 
-  it('dispose unregisters all twenty-five tools', () => {
-    expect(ctx.registered.size).toBe(25)
+  it('dispose unregisters all twenty-nine tools', () => {
+    expect(ctx.registered.size).toBe(29)
     dispose()
     expect(ctx.registered.size).toBe(0)
   })
@@ -2120,5 +2125,197 @@ describe('registerTools (asset library tools)', () => {
     // getAsset now throws not-found.
     const getTool = ctx.registered.get('aigc_library_get')!
     await expect(getTool.execute({ asset_id: promoted.asset_id }, execFor('s1'))).rejects.toThrow(AigcError)
+  })
+})
+
+// ── Pipeline template tools (per docs/product/02-pipeline.md §7) ──────────
+describe('registerTools (pipeline template tools)', () => {
+  let cwd: string
+  let canvas: AigcCanvasService
+  let ctx: MockTools
+  let dispose: () => void
+  let templatesDir: string
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'aigc-tpl-tools-'))
+    templatesDir = await mkdtemp(join(tmpdir(), 'aigc-tpl-dir-'))
+    canvas = createAigcCanvasService(() => cwd)
+    ctx = mockCtx()
+    setTemplatesDir(templatesDir)
+    dispose = registerAll(ctx, [STUB_PROVIDER], canvas, cwd).dispose
+  })
+
+  afterEach(async () => {
+    dispose()
+    resetTemplatesDir()
+    await rm(cwd, { recursive: true, force: true })
+    await rm(templatesDir, { recursive: true, force: true })
+  })
+
+  it('aigc_template_list returns all 5 built-in templates with no user-saved ones', async () => {
+    const tool = ctx.registered.get('aigc_template_list')!
+    const result = await tool.execute({}, execFor('s1')) as {
+      templates: Array<{ name: string; source: string; param_count: number; step_count: number; params: Array<{ name: string; required: boolean }> }>
+    }
+    expect(result.templates).toHaveLength(BUILTIN_TEMPLATES.length)
+    expect(result.templates.map(t => t.name).sort()).toEqual(
+      BUILTIN_TEMPLATES.map(t => t.name).sort(),
+    )
+    expect(result.templates.every(t => t.source === 'built-in')).toBe(true)
+    // Spot-check 30s-product-ad: 5 steps, 3 declared params (product_name*, tagline*, voice).
+    const ad = result.templates.find(t => t.name === '30s-product-ad')!
+    expect(ad.step_count).toBe(5)
+    expect(ad.param_count).toBe(3)
+    expect(ad.params.map(p => `${p.name}${p.required ? '*' : ''}`).sort()).toEqual(
+      ['product_name*', 'tagline*', 'voice'],
+    )
+  })
+
+  it('aigc_template_get returns the full spec + param declarations for one template', async () => {
+    const tool = ctx.registered.get('aigc_template_get')!
+    const result = await tool.execute({ name: 'simple-t2i' }, execFor('s1')) as {
+      name: string; description: string; source: string
+      params: Array<{ name: string; type: string; required: boolean; default?: string }>
+      spec: { name: string; onError: string; steps: Array<{ id: string; capability?: string; params: Record<string, unknown> }> }
+    }
+    expect(result.name).toBe('simple-t2i')
+    expect(result.source).toBe('built-in')
+    expect(result.params).toHaveLength(2)
+    expect(result.params[0]!.name).toBe('prompt')
+    expect(result.params[0]!.required).toBe(true)
+    expect(result.params[1]!.name).toBe('size')
+    expect(result.params[1]!.required).toBe(false)
+    expect(result.params[1]!.default).toBe('1024x1024')
+    // Spec has the {{param}} placeholders intact.
+    expect(result.spec.steps[0]!.params.prompt).toBe('{{prompt}}')
+    expect(result.spec.steps[0]!.params.size).toBe('{{size}}')
+  })
+
+  it('aigc_template_get throws not-found for an unknown template name', async () => {
+    const tool = ctx.registered.get('aigc_template_get')!
+    await expect(tool.execute({ name: 'nonexistent-template' }, execFor('s1'))).rejects.toThrow(AigcError)
+  })
+
+  it('aigc_template_instantiate runs simple-t2i end-to-end (stub) and places the output on the canvas', async () => {
+    const tool = ctx.registered.get('aigc_template_instantiate')!
+    const result = await tool.execute({
+      name: 'simple-t2i',
+      params: { prompt: 'a red apple' },
+      async: false,
+    }, execFor('s1')) as {
+      pipeline_id: string
+      template_name: string
+      name: string
+      status: string
+      steps: Array<{ id: string; status: string; element_path?: string }>
+    }
+    expect(result.template_name).toBe('simple-t2i')
+    expect(result.status).toBe('completed')
+    expect(result.pipeline_id).toMatch(/^pipe_/)
+    expect(result.steps).toHaveLength(1)
+    expect(result.steps[0]!.id).toBe('image')
+    expect(result.steps[0]!.status).toBe('completed')
+    expect(result.steps[0]!.element_path).toBeDefined()
+    // The {{prompt}} placeholder was substituted (the pipeline name resolves to "simple-t2i (a red apple)").
+    expect(result.name).toContain('a red apple')
+    // Canvas has the produced image element.
+    const snap = canvas.snapshot('s1')
+    expect(snap.elements).toHaveLength(1)
+    expect(snap.elements[0]!.kind).toBe('image')
+    expect(snap.elements[0]!.producedBy).toBe('aigc_pipeline')
+  })
+
+  it('aigc_template_instantiate applies the default for an omitted optional param', async () => {
+    const tool = ctx.registered.get('aigc_template_instantiate')!
+    // Omit `size` (optional, default "1024x1024"); the engine should receive the default.
+    const result = await tool.execute({
+      name: 'simple-t2i',
+      params: { prompt: 'no size given' },
+      async: false,
+    }, execFor('s1')) as { steps: Array<{ status: string }> }
+    expect(result.steps[0]!.status).toBe('completed')
+  })
+
+  it('aigc_template_instantiate rejects a missing required param', async () => {
+    const tool = ctx.registered.get('aigc_template_instantiate')!
+    await expect(tool.execute({
+      name: 'simple-t2i',
+      params: {}, // prompt is required
+      async: false,
+    }, execFor('s1'))).rejects.toThrow(/prompt/)
+  })
+
+  it('aigc_template_instantiate rejects an unknown param', async () => {
+    const tool = ctx.registered.get('aigc_template_instantiate')!
+    await expect(tool.execute({
+      name: 'simple-t2i',
+      params: { prompt: 'p', bogus: 'x' },
+      async: false,
+    }, execFor('s1'))).rejects.toThrow(/bogus/)
+  })
+
+  it('aigc_template_save persists a pipeline as a template and aigc_template_list then shows it (source=user)', async () => {
+    // First run a pipeline so we have a state to save.
+    const runTool = ctx.registered.get('aigc_pipeline_run')!
+    const runResult = await runTool.execute({
+      spec: {
+        name: 'saved-pipeline', onError: 'abort',
+        steps: [{ id: 'a', capability: 't2i', params: { prompt: 'p' } }],
+      },
+      async: false,
+    }, execFor('s1')) as { pipeline_id: string }
+    // Save it as a template.
+    const saveTool = ctx.registered.get('aigc_template_save')!
+    const saved = await saveTool.execute({
+      pipeline_id: runResult.pipeline_id,
+      name: 'my-saved-template',
+      description: 'A pipeline saved from a session',
+      params: [{ name: 'product', type: 'string', required: true, description: '产品名' }],
+    }, execFor('s1')) as { name: string; source: string; file_path: string; step_count: number; param_count: number }
+    expect(saved.name).toBe('my-saved-template')
+    expect(saved.source).toBe('user')
+    expect(saved.step_count).toBe(1)
+    expect(saved.param_count).toBe(1)
+    expect(saved.file_path).toContain(templatesDir)
+    // The saved template now appears in aigc_template_list with source=user.
+    const listTool = ctx.registered.get('aigc_template_list')!
+    const list = await listTool.execute({}, execFor('s1')) as {
+      templates: Array<{ name: string; source: string }>
+    }
+    const savedEntry = list.templates.find(t => t.name === 'my-saved-template')
+    expect(savedEntry).toBeDefined()
+    expect(savedEntry!.source).toBe('user')
+    // Built-in count is unchanged.
+    expect(list.templates.filter(t => t.source === 'built-in')).toHaveLength(BUILTIN_TEMPLATES.length)
+    // aigc_template_get can fetch the saved template.
+    const getTool = ctx.registered.get('aigc_template_get')!
+    const fetched = await getTool.execute({ name: 'my-saved-template' }, execFor('s1')) as {
+      name: string; source: string; description: string; params: Array<{ name: string }>
+    }
+    expect(fetched.source).toBe('user')
+    expect(fetched.description).toBe('A pipeline saved from a session')
+    expect(fetched.params[0]!.name).toBe('product')
+  })
+
+  it('aigc_template_save overwrites a same-name user template (shadow semantics)', async () => {
+    const runTool = ctx.registered.get('aigc_pipeline_run')!
+    const run1 = await runTool.execute({
+      spec: { name: 'first', onError: 'abort', steps: [{ id: 'a', capability: 't2i', params: { prompt: 'p1' } }] },
+      async: false,
+    }, execFor('s1')) as { pipeline_id: string }
+    const saveTool = ctx.registered.get('aigc_template_save')!
+    await saveTool.execute({ pipeline_id: run1.pipeline_id, name: 'reusable-template' }, execFor('s1'))
+    // Save again with a different pipeline — should overwrite, not error.
+    const run2 = await runTool.execute({
+      spec: { name: 'second', onError: 'abort', steps: [{ id: 'a', capability: 't2i', params: { prompt: 'p2' } }] },
+      async: false,
+    }, execFor('s1')) as { pipeline_id: string }
+    const second = await saveTool.execute({ pipeline_id: run2.pipeline_id, name: 'reusable-template' }, execFor('s1')) as { step_count: number }
+    expect(second.step_count).toBe(1)
+    // The list shows only one entry with that name.
+    const listTool = ctx.registered.get('aigc_template_list')!
+    const list = await listTool.execute({}, execFor('s1')) as { templates: Array<{ name: string; source: string }> }
+    expect(list.templates.filter(t => t.name === 'reusable-template')).toHaveLength(1)
+    expect(list.templates.find(t => t.name === 'reusable-template')!.source).toBe('user')
   })
 })

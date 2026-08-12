@@ -926,3 +926,334 @@
   background: var(--dsw-alias-interactive-bg-active);
   color: var(--dsw-alias-label-primary);
 }
+
+/* ── Multi-select + Compare view (per docs/product/04-ux-reliability.md §2) */
+
+/* Outline drawn around nodes that are in the multi-select set. The
+ * outline uses the brand color so it's clearly distinguishable from the
+ * regular hover/focus ring. Drawn on the nodeBox wrapper (not the inner
+ * .node card) so it doesn't fight with the card's own border-radius. */
+.nodeBoxMultiSelected {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
+/* Floating bar above the canvas (top-center) that appears when 2-4
+ * elements are in the multi-select set. Shows the count + a "Compare"
+ * button + a "Clear" button. */
+.multiSelectBar {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  background: var(--dsw-alias-bg-layer-2);
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+}
+
+.multiSelectCount {
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-secondary);
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+.multiSelectCompareButton {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  border: none;
+  border-radius: 6px;
+  background: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-label-primary-foreground);
+  font: var(--dsw-font-xxs-12);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.multiSelectCompareButton:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.multiSelectCompareButton:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.multiSelectClearButton {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.multiSelectClearButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* The compare overlay: covers the entire canvas surface with a semi-opaque
+ * backdrop so the user can focus on comparing the selected elements.
+ * Stops wheel + pointer events from reaching the canvas surface below. */
+.compareOverlay {
+  position: absolute;
+  inset: 36px 0 0 0;
+  z-index: 18;
+  display: flex;
+  flex-direction: column;
+  background: var(--dsw-alias-bg-layer-1);
+  /* Slight opacity so the canvas is still hinted behind, but the focus
+   * is clearly on the compare cards. */
+  backdrop-filter: blur(2px);
+}
+
+.compareHeader {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.compareTitle {
+  flex: 1;
+  font: var(--dsw-font-s-14);
+  color: var(--dsw-alias-label-primary);
+}
+
+.compareCloseButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font: var(--dsw-font-s-14);
+  line-height: 1;
+}
+
+.compareCloseButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Grid of compare cards. Up to 4 columns; each card takes an equal
+ * fraction of the available width. On narrow viewports the cards wrap
+ * to the next row (rare in practice — the overlay is wide). */
+.compareGrid {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  align-content: start;
+}
+
+/* One compare card: media box on top, prompt + meta + winner button below. */
+.compareCard {
+  display: flex;
+  flex-direction: column;
+  background: var(--dsw-alias-bg-layer-2);
+  border-radius: 12px;
+  box-shadow: var(--dsw-shadow-lv3);
+  overflow: hidden;
+  /* Equal height per row (so the winner buttons line up at the bottom). */
+  min-height: 320px;
+}
+
+/* Media box: fixed target height so all cards in one row line up.
+ * Media is `object-fit: contain` so different aspect ratios still
+ * render fully without distortion. */
+.compareCardMedia {
+  flex: 0 0 200px;
+  width: 100%;
+  background: var(--dsw-alias-interactive-bg-hover);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.compareMediaImage,
+.compareMediaVideo {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.compareMediaAudioWrap {
+  width: 100%;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.compareMediaAudio {
+  width: 100%;
+}
+
+.compareMediaEmpty {
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-tertiary);
+  text-align: center;
+  padding: 12px;
+  word-break: break-word;
+}
+
+.compareCardBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.comparePrompt {
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-radius: 6px;
+  font: var(--dsw-font-xxs-12);
+  font-family: var(--ds-font-family-code);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.comparePromptEmpty {
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-dimmed);
+  font-style: italic;
+  padding: 6px 8px;
+}
+
+.compareMetaRow {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.compareMetaLabel {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  text-transform: lowercase;
+}
+
+.compareMetaValue {
+  flex: 1 1 auto;
+  color: var(--dsw-alias-label-primary);
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+
+.compareCardFooter {
+  flex: none;
+  padding: 8px 10px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  display: flex;
+  justify-content: center;
+}
+
+/* Compare footer (overlay-level): the "Reject all" + "Close" buttons. */
+.compareFooter {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+/* Button styles for the compare view (primary / secondary / danger).
+ * These mirror the toolbar button aesthetic but are slightly taller
+ * (h32 r8 instead of h24 r6) since the compare footer has more room
+ * and the actions are consequential. */
+.compareButtonPrimary {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  border: none;
+  border-radius: 6px;
+  background: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-label-primary-foreground);
+  font: var(--dsw-font-xxs-12);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.compareButtonPrimary:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.compareButtonPrimary:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.compareButtonSecondary {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.compareButtonSecondary:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+}
+
+.compareButtonDanger {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-state-error-primary);
+  font: var(--dsw-font-xxs-12);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.compareButtonDanger:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover-danger);
+}
+
+.compareButtonDanger:disabled {
+  opacity: 0.4;
+  cursor: default;
+}

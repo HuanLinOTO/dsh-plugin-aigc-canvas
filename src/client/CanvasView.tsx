@@ -20,6 +20,7 @@ import type { AigcCanvasState, AigcEdge, AigcElement, EdgeRelation, ElementStatu
 import { CanvasStore } from './store.js'
 import { CanvasNode } from './CanvasNode.js'
 import { RequestLogPanel } from './RequestLogPanel.js'
+import { CompareView } from './CompareView.js'
 import { fetchSessionCost, mediaUrlOf, notifyAgent, promoteAsset, setElementStatus } from './api.js'
 import css from './canvas.module.css'
 
@@ -226,6 +227,17 @@ export function CanvasView({ store, t }: CanvasViewProps): ReactNode {
   const [viewport, setViewport] = useState<Viewport>({ x: 0, y: 0, scale: 1 })
   const [drafts, setDrafts] = useState<ReadonlyMap<string, { x: number; y: number }>>(new Map())
   const [selected, setSelected] = useState<AigcElement | undefined>(undefined)
+  /**
+   * Multi-select set for the compare view (per docs/product/04-ux-reliability.md §2).
+   *
+   * Holds 0-4 element uuids. Shift+click on a node toggles its uuid in
+   * this set; click on the empty surface clears it. When the set has
+   * 2-4 entries, the canvas header shows a "Compare" button that opens
+   * the CompareView overlay.
+   */
+  const [multiSelected, setMultiSelected] = useState<ReadonlySet<string>>(new Set())
+  /** Whether the CompareView overlay is currently mounted. */
+  const [showCompare, setShowCompare] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; uuid: string } | undefined>(undefined)
   const [dropTarget, setDropTarget] = useState<{ x: number; y: number } | undefined>(undefined)
   const [uploading, setUploading] = useState(false)
@@ -463,6 +475,18 @@ export function CanvasView({ store, t }: CanvasViewProps): ReactNode {
   const onNodePointerDown = (event: ReactPointerEvent<HTMLElement>, el: AigcElement): void => {
     if (el.uuid === undefined) return
     event.stopPropagation()
+    // Shift+click toggles the element in the multi-select set (for the
+    // compare view). Per docs/product/04-ux-reliability.md §2. Doesn't
+    // start a drag — the gesture is a selection toggle, not a move.
+    if (event.shiftKey) {
+      setMultiSelected(prev => {
+        const next = new Set(prev)
+        if (next.has(el.uuid!)) next.delete(el.uuid!)
+        else if (next.size < 4) next.add(el.uuid!)
+        return next
+      })
+      return
+    }
     event.currentTarget.setPointerCapture(event.pointerId)
     dragRef.current = {
       pointerId: event.pointerId,
@@ -482,11 +506,16 @@ export function CanvasView({ store, t }: CanvasViewProps): ReactNode {
     setContextMenu({ x: event.clientX, y: event.clientY, uuid: el.uuid })
   }
 
-  // Click anywhere → close the context menu.
+  // Click anywhere → close the context menu + clear the multi-select set
+  // (per docs/product/04-ux-reliability.md §2: clicking the empty canvas
+  // background dismisses the selection).
   const onSurfaceClick = (event: ReactMouseEvent<HTMLElement>): void => {
     if (contextMenu !== undefined) {
       event.stopPropagation()
       setContextMenu(undefined)
+    }
+    if (multiSelected.size > 0) {
+      setMultiSelected(new Set())
     }
   }
 
@@ -956,11 +985,12 @@ export function CanvasView({ store, t }: CanvasViewProps): ReactNode {
             ),
             ...filteredElements.map(el => {
               const pos = posOf(el)
+              const selectedClass = el.uuid !== undefined && multiSelected.has(el.uuid) ? ` ${css.nodeBoxMultiSelected ?? ''}` : ''
               return createElement(
                 'div',
                 {
                   key: el.uuid ?? el.filePath,
-                  className: `${css.nodeBox} ${el.uuid !== undefined ? css.nodeBoxDraggable : ''}`,
+                  className: `${css.nodeBox} ${el.uuid !== undefined ? css.nodeBoxDraggable : ''}${selectedClass}`,
                   style: { transform: `translate(${pos.x}px, ${pos.y}px)` },
                   onPointerDown: event => onNodePointerDown(event, el),
                   onDoubleClick: (event: ReactMouseEvent<HTMLElement>) => {
@@ -1048,6 +1078,42 @@ export function CanvasView({ store, t }: CanvasViewProps): ReactNode {
             title: t('toolbarRunWorkflowTitle'),
           }, t('toolbarRunWorkflow')),
         )
+      : null,
+    // Multi-select toolbar (per docs/product/04-ux-reliability.md §2).
+    // When 2-4 elements are in the multi-select set, show a small floating
+    // bar above the canvas with the count + a "Compare" button + a
+    // "Clear" button. Clicking "Compare" opens the CompareView overlay.
+    multiSelected.size >= 2
+      ? createElement(
+          'div',
+          { className: css.multiSelectBar },
+          createElement('span', { className: css.multiSelectCount }, t('compareNSelected').replace('{n}', String(multiSelected.size))),
+          createElement('button', {
+            type: 'button',
+            className: css.multiSelectCompareButton,
+            onClick: () => setShowCompare(true),
+            disabled: multiSelected.size < 2 || multiSelected.size > 4,
+            title: multiSelected.size > 4 ? t('compareTooMany') : t('compareButton'),
+          }, t('compareButton')),
+          createElement('button', {
+            type: 'button',
+            className: css.multiSelectClearButton,
+            onClick: () => setMultiSelected(new Set()),
+          }, t('compareClearSelection')),
+        )
+      : null,
+    // CompareView overlay (per docs/product/04-ux-reliability.md §2).
+    // Mounted only when showCompare is true AND the multi-select still
+    // holds 2-4 elements (in case the WS push removed one between opening
+    // the overlay and rendering — we re-resolve the elements from the
+    // latest snapshot here).
+    showCompare && state.sessionId !== ''
+      ? createElement(CompareView, {
+          sessionId: state.sessionId,
+          elements: state.elements.filter(e => e.uuid !== undefined && multiSelected.has(e.uuid)),
+          t,
+          onClose: () => setShowCompare(false),
+        })
       : null,
     // Minimap: bottom-right overview showing element outlines + viewport frame.
     state.elements.length > 0

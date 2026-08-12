@@ -32,11 +32,22 @@ import {
   fetchConfig,
   removeProvider,
   updateProvider,
+  RUNTIME_CAPABILITIES,
+  RUNTIME_HTTP_METHODS,
+  RUNTIME_PARAM_TYPES,
+  RUNTIME_QUALITY_HINTS,
+  RUNTIME_RESPONSE_KINDS,
+  type RuntimeCapability,
+  type RuntimeEndpointSpec,
+  type RuntimeHttpMethod,
+  type RuntimeParamSpec,
   type RuntimeProvider,
+  type RuntimeQualityHint,
+  type RuntimeResponseKind,
 } from './api.js'
 import css from './SettingsPage.module.css'
 
-/** Inject face: locale translate + conversation send (for the init action). */
+/** Inject face: locale translate + conversation send (for the init + auto-detect actions). */
 export interface AigcSettingsInjected {
   readonly t: (key: string) => string
   /** Send a prompt into the current conversation scope (queued turn). */
@@ -46,9 +57,64 @@ export interface AigcSettingsInjected {
 /** Full props: settings.section runtime share + locale seat + inject. */
 type SettingsPageProps = PropsRuntime<'settings.section'> & PropsLocale<'dsh-aigc-canvas'> & AigcSettingsInjected
 
-/** Default shape for a brand-new draft (before the user fills in id/name). */
+/**
+ * Default shape for a brand-new draft (before the user fills in id/name).
+ * The structured-catalog fields default to sane values so the endpoints
+ * editor starts empty (the agent's "Initialize" / "Auto-detect" buttons
+ * populate it after probing the API).
+ */
 function emptyDraft(): RuntimeProvider {
-  return { id: '', name: '', endpoint: 'stub://aigc-backend', apiKey: '', instructions: '', auth: { scheme: 'bearer', name: '' }, builtin: false }
+  return {
+    id: '',
+    name: '',
+    endpoint: 'stub://aigc-backend',
+    apiKey: '',
+    instructions: '',
+    auth: { scheme: 'bearer', name: '' },
+    builtin: false,
+    endpoints: [],
+    priority: 100,
+    costPerCall: 0,
+    costPerKiloToken: 0,
+    costPerSecond: 0,
+    avgLatencyMs: 0,
+    qualityHint: 'balanced',
+  }
+}
+
+/** Build a fresh blank endpoint (for the "+ Add endpoint" button). */
+function emptyEndpoint(): RuntimeEndpointSpec {
+  return {
+    path: '',
+    method: 'POST',
+    capability: 't2i',
+    params: [],
+    response: { kind: 'json_text', path: '' },
+    acceptsCanvasRef: false,
+    notes: '',
+  }
+}
+
+/** Build a fresh blank parameter (for the "+ Add parameter" button). */
+function emptyParam(): RuntimeParamSpec {
+  return { name: '', type: 'string', required: false, default: '', description: '' }
+}
+
+/** Coerce a possibly-undefined value to a number (default 0 when invalid). */
+function toNumber(v: unknown, fallback = 0): number {
+  if (typeof v === 'number' && Number.isFinite(v)) return v
+  if (typeof v === 'string') {
+    const n = Number(v)
+    if (Number.isFinite(n) && v.trim() !== '') return n
+  }
+  return fallback
+}
+
+/** Coerce a possibly-undefined value to a string (default ''). */
+function toStr(v: unknown): string {
+  if (typeof v === 'string') return v
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  return ''
 }
 
 /**
@@ -129,6 +195,25 @@ export function SettingsPage({ t, send }: SettingsPageProps) {
     }
   }, [send, t])
 
+  /**
+   * Auto-detect (per docs/product/03-provider-catalog.md §5): send a
+   * prepared message into the current conversation asking the agent to
+   * call `aigc_probe_endpoint` for each endpoint whose response.kind is
+   * not yet set, then save the detected shapes via
+   * `aigc_provider_set_endpoints`. The agent handles the actual probing
+   * + persistence; the client just sends the prompt (same pattern as
+   * the "Initialize" action).
+   */
+  const autoDetect = useCallback(async (provider: RuntimeProvider) => {
+    const label = provider.name === '' ? provider.id : provider.name
+    const text = t('row.autoDetectPrompt').replace('{name}', label).replace('{id}', provider.id)
+    try {
+      await send(text)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }, [send, t])
+
   const patchDraft = (id: string, patch: Partial<RuntimeProvider>): void => {
     setDrafts(prev => prev.map(d => (d.id === id ? { ...d, ...patch } : d)))
   }
@@ -175,6 +260,7 @@ export function SettingsPage({ t, send }: SettingsPageProps) {
               onSave={() => void update(draft)}
               onDelete={() => setConfirmDelete(draft.id)}
               onInit={() => void init(draft)}
+              onAutoDetect={() => void autoDetect(draft)}
             />
           ))}
           {addingNew && (
@@ -240,12 +326,62 @@ interface ProviderCardProps {
   readonly onCreate?: () => void
   readonly onCancel?: () => void
   readonly onInit?: () => void
+  readonly onAutoDetect?: () => void
 }
 
-function ProviderCard({ draft, expanded, isNew, isDefault, t, onToggle, onPatch, onSave, onDelete, onCreate, onCancel, onInit }: ProviderCardProps) {
+function ProviderCard({ draft, expanded, isNew, isDefault, t, onToggle, onPatch, onSave, onDelete, onCreate, onCancel, onInit, onAutoDetect }: ProviderCardProps) {
   const isStub = draft.endpoint === '' || draft.endpoint === 'stub://aigc-backend'
   const patchAuth = (patch: Partial<{ scheme: 'bearer' | 'header' | 'query'; name: string }>): void => {
     onPatch({ auth: { ...draft.auth, ...patch } })
+  }
+  /**
+   * Patch one endpoint in the draft's endpoints array (by index).
+   * Replaces the whole array so React sees a new reference and re-renders.
+   */
+  const patchEndpoint = (index: number, patch: Partial<RuntimeEndpointSpec>): void => {
+    const next = [...(draft.endpoints ?? [])]
+    const existing = next[index]
+    if (existing === undefined) return
+    next[index] = { ...existing, ...patch }
+    onPatch({ endpoints: next })
+  }
+  /** Append a fresh blank endpoint to the endpoints array. */
+  const addEndpoint = (): void => {
+    const next = [...(draft.endpoints ?? []), emptyEndpoint()]
+    onPatch({ endpoints: next })
+  }
+  /** Remove the endpoint at one index. */
+  const removeEndpoint = (index: number): void => {
+    const next = [...(draft.endpoints ?? [])]
+    next.splice(index, 1)
+    onPatch({ endpoints: next })
+  }
+  /**
+   * Patch one parameter on one endpoint (by endpoint index + param index).
+   */
+  const patchParam = (epIndex: number, paramIndex: number, patch: Partial<RuntimeParamSpec>): void => {
+    const ep = (draft.endpoints ?? [])[epIndex]
+    if (ep === undefined) return
+    const params = [...(ep.params ?? [])]
+    const existing = params[paramIndex]
+    if (existing === undefined) return
+    params[paramIndex] = { ...existing, ...patch }
+    patchEndpoint(epIndex, { params })
+  }
+  /** Append a fresh blank parameter to one endpoint. */
+  const addParam = (epIndex: number): void => {
+    const ep = (draft.endpoints ?? [])[epIndex]
+    if (ep === undefined) return
+    const params = [...(ep.params ?? []), emptyParam()]
+    patchEndpoint(epIndex, { params })
+  }
+  /** Remove the parameter at one index on one endpoint. */
+  const removeParam = (epIndex: number, paramIndex: number): void => {
+    const ep = (draft.endpoints ?? [])[epIndex]
+    if (ep === undefined) return
+    const params = [...(ep.params ?? [])]
+    params.splice(paramIndex, 1)
+    patchEndpoint(epIndex, { params })
   }
   return (
     <li className={css.rowCard}>
@@ -284,6 +420,11 @@ function ProviderCard({ draft, expanded, isNew, isDefault, t, onToggle, onPatch,
               {!isStub && onInit !== undefined && (
                 <button type="button" className={css.secondaryButton} onClick={onInit}>
                   {t('row.init')}
+                </button>
+              )}
+              {!isStub && onAutoDetect !== undefined && (
+                <button type="button" className={css.secondaryButton} onClick={onAutoDetect} title={t('row.autoDetectTitle')}>
+                  {t('row.autoDetect')}
                 </button>
               )}
               <button type="button" className={css.secondaryButton} onClick={onSave}>
@@ -377,6 +518,105 @@ function ProviderCard({ draft, expanded, isNew, isDefault, t, onToggle, onPatch,
             </div>
             <span className={css.desc}>{t('row.authDesc')}</span>
           </div>
+          {/* ── Selection policy fields (per docs/product/03-provider-catalog.md §4) ─ */}
+          <div className={css.fieldRow}>
+            <label className={css.field}>
+              <span className={css.fieldLabel}>{t('row.priority')}</span>
+              <input
+                className={css.input}
+                type="number"
+                min={0}
+                step={1}
+                value={toNumber(draft.priority, 100)}
+                onChange={e => onPatch({ priority: toNumber(e.target.value, 100) })}
+              />
+              <span className={css.desc}>{t('row.priorityDesc')}</span>
+            </label>
+            <label className={css.field}>
+              <span className={css.fieldLabel}>{t('row.qualityHint')}</span>
+              <select
+                className={css.select}
+                value={draft.qualityHint ?? 'balanced'}
+                onChange={e => onPatch({ qualityHint: e.target.value as RuntimeQualityHint })}
+              >
+                {RUNTIME_QUALITY_HINTS.map(q => (
+                  <option key={q} value={q}>{q}</option>
+                ))}
+              </select>
+              <span className={css.desc}>{t('row.qualityHintDesc')}</span>
+            </label>
+          </div>
+          <div className={css.fieldRow}>
+            <label className={css.field}>
+              <span className={css.fieldLabel}>{t('row.costPerCall')}</span>
+              <input
+                className={css.input}
+                type="number"
+                min={0}
+                step={0.0001}
+                value={toNumber(draft.costPerCall, 0)}
+                onChange={e => onPatch({ costPerCall: toNumber(e.target.value, 0) })}
+              />
+              <span className={css.desc}>{t('row.costPerCallDesc')}</span>
+            </label>
+            <label className={css.field}>
+              <span className={css.fieldLabel}>{t('row.costPerKiloToken')}</span>
+              <input
+                className={css.input}
+                type="number"
+                min={0}
+                step={0.0001}
+                value={toNumber(draft.costPerKiloToken, 0)}
+                onChange={e => onPatch({ costPerKiloToken: toNumber(e.target.value, 0) })}
+              />
+              <span className={css.desc}>{t('row.costPerKiloTokenDesc')}</span>
+            </label>
+            <label className={css.field}>
+              <span className={css.fieldLabel}>{t('row.costPerSecond')}</span>
+              <input
+                className={css.input}
+                type="number"
+                min={0}
+                step={0.0001}
+                value={toNumber(draft.costPerSecond, 0)}
+                onChange={e => onPatch({ costPerSecond: toNumber(e.target.value, 0) })}
+              />
+              <span className={css.desc}>{t('row.costPerSecondDesc')}</span>
+            </label>
+          </div>
+          {/* ── Endpoints catalog editor (per docs/product/03-provider-catalog.md §5) ─ */}
+          <div className={css.field}>
+            <div className={css.fieldLabelRow}>
+              <span className={css.fieldLabel}>{t('row.endpoints')}</span>
+              {!isStub && onAutoDetect !== undefined && (
+                <button type="button" className={css.endpointsAutoDetectButton} onClick={onAutoDetect} title={t('row.autoDetectTitle')}>
+                  {t('row.autoDetect')}
+                </button>
+              )}
+            </div>
+            <span className={css.desc}>{t('row.endpointsDesc')}</span>
+            {(draft.endpoints ?? []).length === 0 ? (
+              <div className={css.endpointsEmpty}>{t('row.endpointsEmpty')}</div>
+            ) : (
+              <div className={css.endpointsList}>
+                {(draft.endpoints ?? []).map((ep, epIndex) => (
+                  <EndpointCard
+                    key={epIndex}
+                    endpoint={ep}
+                    t={t}
+                    onPatch={(patch) => patchEndpoint(epIndex, patch)}
+                    onRemove={() => removeEndpoint(epIndex)}
+                    onAddParam={() => addParam(epIndex)}
+                    onPatchParam={(paramIndex, patch) => patchParam(epIndex, paramIndex, patch)}
+                    onRemoveParam={(paramIndex) => removeParam(epIndex, paramIndex)}
+                  />
+                ))}
+              </div>
+            )}
+            <button type="button" className={css.addEndpointButton} onClick={addEndpoint}>
+              {t('row.addEndpoint')}
+            </button>
+          </div>
           <label className={css.field}>
             <span className={css.fieldLabel}>{t('row.instructions')}</span>
             <textarea
@@ -392,5 +632,168 @@ function ProviderCard({ draft, expanded, isNew, isDefault, t, onToggle, onPatch,
         </div>
       )}
     </li>
+  )
+}
+
+// ─── EndpointCard ─────────────────────────────────────────────────────────────
+
+interface EndpointCardProps {
+  readonly endpoint: RuntimeEndpointSpec
+  readonly t: (key: string) => string
+  readonly onPatch: (patch: Partial<RuntimeEndpointSpec>) => void
+  readonly onRemove: () => void
+  readonly onAddParam: () => void
+  readonly onPatchParam: (paramIndex: number, patch: Partial<RuntimeParamSpec>) => void
+  readonly onRemoveParam: (paramIndex: number) => void
+}
+
+/**
+ * One endpoint in the catalog editor: path / method / capability /
+ * response.kind / response.path + acceptsCanvasRef + notes + parameter
+ * list. Per docs/product/03-provider-catalog.md §5.
+ *
+ * No collapsible state — the card is always expanded so the user can
+ * see all fields. The parameter list is a simple grid (name / type /
+ * required / default) with add/remove buttons.
+ */
+function EndpointCard({ endpoint, t, onPatch, onRemove, onAddParam, onPatchParam, onRemoveParam }: EndpointCardProps) {
+  const response = endpoint.response ?? { kind: 'json_text' as RuntimeResponseKind, path: '' }
+  return (
+    <div className={css.endpointCard}>
+      <div className={css.endpointHead}>
+        <span className={css.endpointHeadLabel}>
+          {endpoint.method} {endpoint.path === '' ? '<path>' : endpoint.path}
+          {endpoint.capability !== undefined && (
+            <Pill className={css.endpointCapabilityBadge}>{endpoint.capability}</Pill>
+          )}
+        </span>
+        <button type="button" className={css.endpointRemoveButton} onClick={onRemove} aria-label={t('row.removeEndpoint')}>
+          ×
+        </button>
+      </div>
+      <div className={css.fieldRow}>
+        <label className={css.field}>
+          <span className={css.fieldLabel}>{t('row.endpointPath')}</span>
+          <input
+            className={css.input}
+            value={endpoint.path}
+            placeholder="/v1/images/generations"
+            onChange={e => onPatch({ path: e.target.value })}
+          />
+        </label>
+        <label className={css.field}>
+          <span className={css.fieldLabel}>{t('row.endpointMethod')}</span>
+          <select
+            className={css.select}
+            value={endpoint.method}
+            onChange={e => onPatch({ method: e.target.value as RuntimeHttpMethod })}
+          >
+            {RUNTIME_HTTP_METHODS.map(m => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+        </label>
+        <label className={css.field}>
+          <span className={css.fieldLabel}>{t('row.endpointCapability')}</span>
+          <select
+            className={css.select}
+            value={endpoint.capability}
+            onChange={e => onPatch({ capability: e.target.value as RuntimeCapability })}
+          >
+            {RUNTIME_CAPABILITIES.map(c => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className={css.fieldRow}>
+        <label className={css.field}>
+          <span className={css.fieldLabel}>{t('row.endpointResponseKind')}</span>
+          <select
+            className={css.select}
+            value={response.kind}
+            onChange={e => onPatch({ response: { kind: e.target.value as RuntimeResponseKind, path: response.path } })}
+          >
+            {RUNTIME_RESPONSE_KINDS.map(k => (
+              <option key={k} value={k}>{k}</option>
+            ))}
+          </select>
+        </label>
+        <label className={css.field}>
+          <span className={css.fieldLabel}>{t('row.endpointResponsePath')}</span>
+          <input
+            className={css.input}
+            value={toStr(response.path)}
+            placeholder="data[0].b64_json"
+            onChange={e => onPatch({ response: { kind: response.kind, path: e.target.value } })}
+          />
+        </label>
+      </div>
+      <label className={css.fieldRow}>
+        <input
+          type="checkbox"
+          checked={endpoint.acceptsCanvasRef === true}
+          onChange={e => onPatch({ acceptsCanvasRef: e.target.checked })}
+        />
+        <span className={css.desc}>{t('row.endpointAcceptsCanvasRef')}</span>
+      </label>
+      <label className={css.field}>
+        <span className={css.fieldLabel}>{t('row.endpointNotes')}</span>
+        <input
+          className={css.input}
+          value={toStr(endpoint.notes)}
+          placeholder="size must be 1024x1024 or 1792x1024"
+          onChange={e => onPatch({ notes: e.target.value })}
+        />
+      </label>
+      <div className={css.field}>
+        <span className={css.fieldLabel}>{t('row.endpointParams')}</span>
+        {(endpoint.params ?? []).length === 0 ? (
+          <div className={css.endpointsEmpty}>{t('row.endpointParamsEmpty')}</div>
+        ) : (
+          <div className={css.paramsTable}>
+            {(endpoint.params ?? []).map((param, paramIndex) => (
+              <div key={paramIndex} className={css.paramRow}>
+                <input
+                  className={css.input}
+                  value={param.name}
+                  placeholder={t('row.endpointParamName')}
+                  onChange={e => onPatchParam(paramIndex, { name: e.target.value })}
+                />
+                <select
+                  className={css.select}
+                  value={param.type}
+                  onChange={e => onPatchParam(paramIndex, { type: e.target.value as RuntimeParamSpec['type'] })}
+                >
+                  {RUNTIME_PARAM_TYPES.map(tp => (
+                    <option key={tp} value={tp}>{tp}</option>
+                  ))}
+                </select>
+                <label className={css.paramRequired}>
+                  <input
+                    type="checkbox"
+                    checked={param.required}
+                    onChange={e => onPatchParam(paramIndex, { required: e.target.checked })}
+                  />
+                  <span>{t('row.endpointParamRequired')}</span>
+                </label>
+                <input
+                  className={css.input}
+                  value={toStr(param.default)}
+                  placeholder={t('row.endpointParamDefault')}
+                  onChange={e => onPatchParam(paramIndex, { default: e.target.value })}
+                />
+                <button type="button" className={css.paramRemoveButton} onClick={() => onRemoveParam(paramIndex)} aria-label={t('row.endpointRemoveParam')}>
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <button type="button" className={css.addEndpointButton} onClick={onAddParam}>
+          {t('row.endpointAddParam')}
+        </button>
+      </div>
+    </div>
   )
 }

@@ -155,6 +155,22 @@ function elementProjection(el: AigcElement): Record<string, unknown> {
   }
 }
 
+/**
+ * Summarized element projection: omits meta/promptText/mediaSize to keep
+ * the agent's context small in long pipelines (per doc 02 §11 risk mitigation).
+ */
+function elementProjectionSummarized(el: AigcElement): Record<string, unknown> {
+  return {
+    filePath: el.filePath,
+    kind: el.kind,
+    title: el.title,
+    x: el.x,
+    y: el.y,
+    status: el.status,
+    ...(el.winner !== undefined ? { winner: el.winner } : {}),
+  }
+}
+
 /** Edge projection: resolve uuids to filePaths so the agent can read the graph. */
 function edgeProjection(edge: { source: string; target: string; relation?: EdgeRelation; note?: string }, lookup: (uuid: string) => AigcElement): { source: string; target: string; relation: EdgeRelation; note?: string } {
   return {
@@ -2678,6 +2694,10 @@ export function registerTools(
         items: { type: 'string', enum: ELEMENT_STATUSES as readonly string[] },
         description: `Lifecycle statuses to include (default: ["ready"]). Pass e.g. ["ready","rejected","archived"] to see all elements. Values: ${(ELEMENT_STATUSES as readonly string[]).join(' | ')}.`,
       },
+      summarize: {
+        type: 'boolean',
+        description: 'When true, returns a COMPRESSED view: elements omit meta/promptText (only filePath/kind/title/status/x/y), and edges omit notes. Use this in long pipelines to avoid context bloat (per doc 02 §11 risk mitigation).',
+      },
     },
     output: {
       schema: {
@@ -2732,7 +2752,7 @@ export function registerTools(
         }]
       },
     },
-    execute: async (args: { include_statuses?: unknown }, exec) => {
+    execute: async (args: { include_statuses?: unknown; summarize?: boolean }, exec) => {
       const sessionId = sessionIdOf(exec)
       await canvas.ensureHydrated(sessionId)
       // Coerce include_statuses into ElementStatus[] (default: only 'ready').
@@ -2746,8 +2766,9 @@ export function registerTools(
       }
       const state = canvas.snapshot(sessionId, includeStatuses)
       const lookup = (uuid: string): AigcElement => canvas.getElement(sessionId, uuid)
+      const summarize = args.summarize === true
       return Promise.resolve({
-        elements: state.elements.map(elementProjection),
+        elements: state.elements.map(el => summarize ? elementProjectionSummarized(el) : elementProjection(el)),
         edges: state.edges.map(e => edgeProjection(e, lookup)),
       })
     },

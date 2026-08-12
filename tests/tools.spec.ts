@@ -1080,6 +1080,26 @@ describe('registerTools (stub provider)', () => {
     expect(withDraft.elements[0]!.status).toBe('draft')
   })
 
+  it('aigc_canvas_list_elements summarize=true omits meta/promptText (context compression)', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const img = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"compression test"}' }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    await placeTool.execute({ description: 'test', file_path: img.file_path, x: 0, y: 0, prompt: 'compression test', meta: { size: '1024x1024' } }, execFor('s1'))
+    const listTool = ctx.registered.get('aigc_canvas_list_elements')!
+    // Full view: includes meta + promptText.
+    const full = await listTool.execute({}, execFor('s1')) as { elements: Array<{ meta?: unknown; promptText?: string; filePath: string; kind: string; status: string }> }
+    expect(full.elements[0]!.meta).toBeDefined()
+    expect(full.elements[0]!.promptText).toBe('compression test')
+    // Summarized view: omits meta + promptText (context compression per doc 02 §11).
+    const summarized = await listTool.execute({ summarize: true }, execFor('s1')) as { elements: Array<{ meta?: unknown; promptText?: string; filePath: string; kind: string; status: string }> }
+    expect(summarized.elements[0]!.meta).toBeUndefined()
+    expect(summarized.elements[0]!.promptText).toBeUndefined()
+    // Core fields still present.
+    expect(summarized.elements[0]!.filePath).toBeDefined()
+    expect(summarized.elements[0]!.kind).toBe('image')
+    expect(summarized.elements[0]!.status).toBe('ready')
+  })
+
   it('tools honor exec.signal.aborted', async () => {
     const ac = new AbortController()
     ac.abort()

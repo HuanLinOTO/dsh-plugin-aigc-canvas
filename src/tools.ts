@@ -52,7 +52,7 @@ import type { Context } from './context-types.js'
 import type { ResolvedAigcProvider } from './config.js'
 import type { AigcElement, AigcCanvasService, EdgeRelation, ElementStatus } from './canvas-registry.js'
 import { canvasDirFor, EDGE_RELATIONS, DEFAULT_EDGE_RELATION, coerceEdgeRelation, ELEMENT_STATUSES, DEFAULT_ELEMENT_STATUS, coerceElementStatus } from './canvas-registry.js'
-import { executeProviderRequest, INLINE_TEXT_CAP, type ProviderBinaryKind } from './provider-http.js'
+import { executeProviderRequest, INLINE_TEXT_CAP, type ProviderBinaryKind, type ProviderHttpResult } from './provider-http.js'
 import { executeMediaEdit, MEDIA_EDIT_OPERATIONS, type MediaEditOperation } from './media-edit.js'
 import { AigcError } from './wire.js'
 import {
@@ -62,6 +62,7 @@ import {
 } from './request-snapshot.js'
 import { logHttpRequest, logMediaEdit, clearLogEntries as clearSessionLog } from './request-log.js'
 import { calculateCallCost, recordCallCost } from './cost-tracker.js'
+import { withRetry, checkDedup, storeDedup, isRetryable, clearSessionDedup } from './retry-dedup.js'
 import type { Capability, EndpointSpec, ResponseKind } from './endpoint-catalog.js'
 import {
   CAPABILITIES,
@@ -754,13 +755,66 @@ export function registerTools(
       }
       const requestStartedAt = Date.now()
       const method = (args.method ?? (body !== undefined ? 'POST' : 'GET')).toUpperCase()
-      const result = await executeProviderRequest(provider, {
-        method: args.method,
-        path: args.path,
-        headers: args.headers,
-        query: args.query,
-        body,
-      }, { timeoutMs: getTimeoutMs(), signal: exec.signal })
+
+      // Dedup: check if we've already made this exact request recently.
+      // Per docs/product/04-ux-reliability.md §4. dedupWindowMs=0 = disabled.
+      const dedupWindowMs = 60000
+      const dedupHit = checkDedup(sessionId, provider.id, method, args.path, body, dedupWindowMs)
+      let result: ProviderHttpResult
+      let deduplicated = false
+      if (dedupHit !== undefined) {
+        // Return cached result — the provider is not called again.
+        // Reconstruct a ProviderHttpResult from the cache entry.
+        if (dedupHit.kind === 'json' || dedupHit.kind === 'text') {
+          result = {
+            ok: true,
+            status: dedupHit.status,
+            kind: dedupHit.kind as 'json' | 'text',
+            contentType: dedupHit.contentType,
+            text: dedupHit.text ?? '',
+          }
+        } else {
+          // Binary dedup cache hit — we don't cache the bytes themselves
+          // (too large), so we can't fully reconstruct. Fall through to re-fetch.
+          // This is a known limitation: dedup is most effective for text/JSON
+          // responses (chat, transcriptions). Binary dedup would require
+          // keeping the bytes in memory.
+          result = await executeProviderRequest(provider, {
+            method: args.method,
+            path: args.path,
+            headers: args.headers,
+            query: args.query,
+            body,
+          }, { timeoutMs: getTimeoutMs(), signal: exec.signal })
+        }
+        deduplicated = dedupHit.kind === 'json' || dedupHit.kind === 'text'
+      } else {
+        // Auto-retry: 429/5xx get exponential backoff (per doc 04 §4).
+        const retryResult = await withRetry(
+          () => executeProviderRequest(provider, {
+            method: args.method,
+            path: args.path,
+            headers: args.headers,
+            query: args.query,
+            body,
+          }, { timeoutMs: getTimeoutMs(), signal: exec.signal }),
+          {
+            signal: exec.signal,
+            isRetryableResult: (r: ProviderHttpResult) => !r.ok && isRetryable(r.status),
+            getResponseStatus: (r: ProviderHttpResult) => r.status,
+          },
+        )
+        result = retryResult.result
+        // Store the result in the dedup cache (only text/JSON — binary too large).
+        if (result.ok && (result.kind === 'json' || result.kind === 'text')) {
+          storeDedup(sessionId, provider.id, method, args.path, body, {
+            status: result.status,
+            contentType: result.contentType,
+            kind: result.kind,
+            text: result.text,
+          }, dedupWindowMs)
+        }
+      }
       const requestDurationMs = Date.now() - requestStartedAt
 
       /**

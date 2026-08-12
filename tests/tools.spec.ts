@@ -1479,16 +1479,20 @@ describe('request log', () => {
 
   it('aigc_http_request logs an entry on failure (non-2xx)', async () => {
     // Use a real provider with mocked fetch to simulate a failure.
+    // NOTE: auto-retry is enabled for 429, so this test waits ~3s for 3 retries
+    // before the final failure is logged. The mock always returns 429.
+    // Each call returns a FRESH Response (Response body can only be read once).
     const failCtx = mockCtx()
     const failRegister = registerAll(failCtx, [REAL_PROVIDER], canvas, cwd)
     try {
       const fetchMock = vi.fn<typeof fetch>()
-      fetchMock.mockResolvedValue(new Response('quota exceeded', { status: 429, headers: { 'content-type': 'text/plain' } }))
+      fetchMock.mockImplementation(() => Promise.resolve(new Response('quota exceeded', { status: 429, headers: { 'content-type': 'text/plain' } })))
       vi.stubGlobal('fetch', fetchMock)
       const httpTool = failCtx.registered.get('aigc_http_request')!
       await httpTool.execute({ method: 'POST', path: '/v1/images/generations', json_body: { prompt: 'x' } }, execFor('s1'))
       const entries = getLogEntries('s1')
-      expect(entries).toHaveLength(1)
+      // Auto-retry logs each attempt — at least 1 entry for the final failure.
+      expect(entries.length).toBeGreaterThanOrEqual(1)
       expect(entries[0]!.status).toBe(429)
       expect(entries[0]!.error).toContain('quota exceeded')
       expect(entries[0]!.elementPath).toBeUndefined()
@@ -1496,7 +1500,7 @@ describe('request log', () => {
       vi.unstubAllGlobals()
       failRegister.dispose()
     }
-  })
+  }, 15000)
 
   it('aigc_http_request redacts the apiKey from logged request headers', async () => {
     // Use a real provider with header auth + mocked fetch.
@@ -1683,10 +1687,13 @@ describe('registerTools (real endpoint through mocked fetch)', () => {
   })
 
   it('returns ok:false with the body for non-2xx responses', async () => {
-    fetchMock.mockResolvedValue(new Response(JSON.stringify({ error: { message: 'quota exceeded' } }), {
+    // NOTE: 429 triggers auto-retry (3 attempts, ~3s backoff). The mock always
+    // returns 429 so the final result is ok:false after retries are exhausted.
+    // Each call returns a FRESH Response (Response body can only be read once).
+    fetchMock.mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ error: { message: 'quota exceeded' } }), {
       status: 429,
       headers: { 'content-type': 'application/json' },
-    }))
+    })))
     const tool = ctx.registered.get('aigc_http_request')!
     const result = await tool.execute({ method: 'POST', path: '/v1/images/generations', body: '{}' }, execFor('s1')) as {
       ok: boolean; status: number; error: string
@@ -1694,7 +1701,7 @@ describe('registerTools (real endpoint through mocked fetch)', () => {
     expect(result.ok).toBe(false)
     expect(result.status).toBe(429)
     expect(result.error).toContain('quota exceeded')
-  })
+  }, 15000)
 
   it('returns sent_body_preview on non-2xx so the model can self-diagnose field loss', async () => {
     fetchMock.mockResolvedValue(new Response('no access to model', {

@@ -19,6 +19,7 @@ import { createAigcCanvasService, canvasDirFor, type AigcCanvasService } from '.
 import { registerTools, elementProjection, edgeProjection, titleOf, type ProviderInfo } from '../src/tools.js'
 import { AigcError } from '../src/wire.js'
 import type { ResolvedAigcProvider } from '../src/config.js'
+import type { EndpointSpec } from '../src/endpoint-catalog.js'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 function execFor(sessionId: string): ToolRunContext {
@@ -54,11 +55,13 @@ function mockCtx(): MockTools {
 const STUB_PROVIDER: ResolvedAigcProvider = {
   id: 'stub', name: '', endpoint: 'stub://aigc-backend', apiKey: '', instructions: '',
   auth: { scheme: 'bearer', name: '' }, builtin: true,
+  endpoints: [], priority: 100, costPerCall: 0, avgLatencyMs: 0, qualityHint: 'balanced',
 }
 
 const REAL_PROVIDER: ResolvedAigcProvider = {
   id: 'real', name: 'Real API', endpoint: 'https://example.com', apiKey: 'sk-test', instructions: 'docs...',
   auth: { scheme: 'bearer', name: '' }, builtin: false,
+  endpoints: [], priority: 100, costPerCall: 0, avgLatencyMs: 0, qualityHint: 'balanced',
 }
 
 function providerInfoList(providers: readonly ResolvedAigcProvider[]): readonly ProviderInfo[] {
@@ -69,6 +72,11 @@ function providerInfoList(providers: readonly ResolvedAigcProvider[]): readonly 
     instructions: p.instructions,
     isStub: p.endpoint === '' || p.endpoint === 'stub://aigc-backend',
     isDefault: i === 0,
+    endpoints: p.endpoints,
+    priority: p.priority,
+    costPerCall: p.costPerCall,
+    avgLatencyMs: p.avgLatencyMs,
+    qualityHint: p.qualityHint,
   }))
 }
 
@@ -94,11 +102,12 @@ function registerAll(
   providers: readonly ResolvedAigcProvider[],
   canvas: AigcCanvasService,
   cwd: string,
-): { dispose: () => void; instructionStore: ReturnType<typeof makeInstructionStore> } {
+): { dispose: () => void; instructionStore: ReturnType<typeof makeInstructionStore>; endpointStore: ReturnType<typeof makeEndpointStore> } {
   // Mutable provider list mirroring the host ProviderStore: set_instructions
-  // writes through, and getProvider / listProviders read live values.
+  // + set_endpoints write through, and getProvider / listProviders read live values.
   const mutable = providers.map(p => ({ ...p }))
   const instructionStore = makeInstructionStore(mutable)
+  const endpointStore = makeEndpointStore(mutable)
   const byId = new Map(mutable.map(p => [p.id, p]))
   const dispose = registerTools(
     ctx as unknown as Parameters<typeof registerTools>[0],
@@ -118,13 +127,44 @@ function registerAll(
       }
       return result
     },
+    (id, endpoints) => {
+      const result = endpointStore.set(id, endpoints)
+      if (result.ok) {
+        const p = byId.get(id)
+        if (p !== undefined) {
+          p.endpoints = [...endpoints]
+          // Mirror ProviderStore: auto-derive instructions from endpoints.
+          p.instructions = endpoints.length > 0
+            ? endpoints.map(ep => `${ep.method} ${ep.path} -> ${ep.response.kind}`).join('\n')
+            : p.instructions
+        }
+      }
+      return result
+    },
     () => providerInfoList(mutable),
     canvas,
     () => cwd,
     () => 5_000,
     () => 100 * 1024 * 1024,
   )
-  return { dispose, instructionStore }
+  return { dispose, instructionStore, endpointStore }
+}
+
+/** A mutable endpoint catalog backing the aigc_provider_set_endpoints callback. */
+function makeEndpointStore(providers: readonly ResolvedAigcProvider[]): {
+  map: Map<string, EndpointSpec[]>
+  set: (id: string, endpoints: readonly EndpointSpec[]) => { ok: boolean; error?: string }
+} {
+  const map = new Map<string, EndpointSpec[]>()
+  for (const p of providers) map.set(p.id, p.endpoints)
+  return {
+    map,
+    set: (id, endpoints) => {
+      if (!map.has(id)) return { ok: false, error: `provider id not found: ${id}` }
+      map.set(id, [...endpoints])
+      return { ok: true }
+    },
+  }
 }
 
 describe('titleOf', () => {
@@ -199,34 +239,45 @@ describe('registerTools (stub provider)', () => {
     await rm(cwd, { recursive: true, force: true })
   })
 
-  it('registers exactly ten tools', () => {
+  it('registers exactly thirteen tools', () => {
     expect(Array.from(ctx.registered.keys()).sort()).toEqual([
       'aigc_canvas_link',
       'aigc_canvas_list_elements',
       'aigc_canvas_place',
       'aigc_canvas_unlink',
+      'aigc_get_endpoint_details',
       'aigc_get_provider_info',
       'aigc_http_request',
       'aigc_media_edit',
+      'aigc_probe_endpoint',
       'aigc_provider_get_instructions',
+      'aigc_provider_set_endpoints',
       'aigc_provider_set_instructions',
       'aigc_reroll',
     ])
   })
 
-  it('aigc_get_provider_info returns the provider list with an instructions preview', async () => {
+  it('aigc_get_provider_info returns the provider list with an instructions preview + capability summary', async () => {
     const tool = ctx.registered.get('aigc_get_provider_info')!
     const result = await tool.execute({}, execFor('s1')) as {
-      providers: Array<{ id: string; name: string; endpoint: string; instructions: string; instructions_total_chars: number; isStub: boolean; isDefault: boolean }>
+      providers: Array<{ id: string; name: string; endpoint: string; instructions: string; instructions_total_chars: number; isStub: boolean; isDefault: boolean; capabilities: string[]; endpoint_count: number; priority: number; qualityHint: string; costPerCall: number }>
+      capabilityMap: Record<string, Array<{ providerId: string; priority: number }>>
     }
     expect(result.providers).toHaveLength(1)
     expect(result.providers[0]!.id).toBe('stub')
     expect(result.providers[0]!.isStub).toBe(true)
     expect(result.providers[0]!.endpoint).toBe('stub://aigc-backend')
     expect(result.providers[0]!.isDefault).toBe(true)
-    // The stub provider has empty instructions → preview is empty, totalChars = 0.
+    // The stub provider has empty instructions + no endpoints → empty capabilities.
     expect(result.providers[0]!.instructions).toBe('')
     expect(result.providers[0]!.instructions_total_chars).toBe(0)
+    expect(result.providers[0]!.capabilities).toEqual([])
+    expect(result.providers[0]!.endpoint_count).toBe(0)
+    expect(result.providers[0]!.priority).toBe(100)
+    expect(result.providers[0]!.qualityHint).toBe('balanced')
+    expect(result.providers[0]!.costPerCall).toBe(0)
+    // capabilityMap is empty when no provider has endpoints.
+    expect(result.capabilityMap).toEqual({})
   })
 
   it('aigc_http_request saves a synthetic image for a stub POST and returns a filePath', async () => {
@@ -1024,10 +1075,146 @@ describe('registerTools (stub provider)', () => {
     }
   })
 
-  it('dispose unregisters all ten tools', () => {
-    expect(ctx.registered.size).toBe(10)
+  it('dispose unregisters all thirteen tools', () => {
+    expect(ctx.registered.size).toBe(13)
     dispose()
     expect(ctx.registered.size).toBe(0)
+  })
+
+  // ── aigc_get_endpoint_details / aigc_provider_set_endpoints / aigc_probe_endpoint ──
+
+  /** One valid EndpointSpec for tests. */
+  const T2I_SPEC: EndpointSpec = {
+    path: '/v1/images/generations',
+    method: 'POST',
+    capability: 't2i',
+    params: [
+      { name: 'prompt', type: 'string', required: true },
+      { name: 'size', type: 'string', default: '1024x1024' },
+    ],
+    response: { kind: 'b64_json_array', path: 'data[0].b64_json' },
+    acceptsCanvasRef: true,
+  }
+  const T2V_SPEC: EndpointSpec = {
+    path: '/v1/videos/generations',
+    method: 'POST',
+    capability: 't2v',
+    params: [{ name: 'prompt', type: 'string', required: true }],
+    response: { kind: 'url_field', path: 'data[0].url' },
+  }
+
+  it('aigc_provider_set_endpoints stores the structured catalog + auto-derives instructions', async () => {
+    const tool = ctx.registered.get('aigc_provider_set_endpoints')!
+    const result = await tool.execute({
+      provider_id: 'stub',
+      endpoints: [T2I_SPEC, T2V_SPEC],
+    }, execFor('s1')) as { ok: boolean; provider_id: string; endpoint_count: number; derived_instructions_chars: number }
+    expect(result.ok).toBe(true)
+    expect(result.provider_id).toBe('stub')
+    expect(result.endpoint_count).toBe(2)
+    expect(result.derived_instructions_chars).toBeGreaterThan(0)
+    // The auto-derived instructions should be visible via aigc_get_provider_info.
+    const infoTool = ctx.registered.get('aigc_get_provider_info')!
+    const info = await infoTool.execute({}, execFor('s1')) as {
+      providers: Array<{ instructions: string; capabilities: string[]; endpoint_count: number }>
+      capabilityMap: Record<string, unknown[]>
+    }
+    expect(info.providers[0]!.endpoint_count).toBe(2)
+    expect(info.providers[0]!.capabilities).toContain('t2i')
+    expect(info.providers[0]!.capabilities).toContain('t2v')
+    expect(info.providers[0]!.instructions).toContain('/v1/images/generations')
+    expect(info.capabilityMap.t2i).toHaveLength(1)
+    expect(info.capabilityMap.t2v).toHaveLength(1)
+  })
+
+  it('aigc_provider_set_endpoints rejects invalid capability enum', async () => {
+    const tool = ctx.registered.get('aigc_provider_set_endpoints')!
+    await expect(tool.execute({
+      provider_id: 'stub',
+      endpoints: [{ path: '/x', method: 'POST', capability: 'bogus', response: { kind: 'json_text' } }],
+    }, execFor('s1'))).rejects.toThrow(AigcError)
+  })
+
+  it('aigc_provider_set_endpoints rejects invalid response.kind enum', async () => {
+    const tool = ctx.registered.get('aigc_provider_set_endpoints')!
+    await expect(tool.execute({
+      provider_id: 'stub',
+      endpoints: [{ path: '/x', method: 'POST', capability: 't2i', response: { kind: 'bogus' } }],
+    }, execFor('s1'))).rejects.toThrow(AigcError)
+  })
+
+  it('aigc_provider_set_endpoints rejects unknown provider ids', async () => {
+    const tool = ctx.registered.get('aigc_provider_set_endpoints')!
+    await expect(tool.execute({ provider_id: 'nope', endpoints: [] }, execFor('s1'))).rejects.toThrow(AigcError)
+  })
+
+  it('aigc_get_endpoint_details returns the EndpointSpec[] for one capability', async () => {
+    // Set endpoints first.
+    const setTool = ctx.registered.get('aigc_provider_set_endpoints')!
+    await setTool.execute({ provider_id: 'stub', endpoints: [T2I_SPEC, T2V_SPEC] }, execFor('s1'))
+    const tool = ctx.registered.get('aigc_get_endpoint_details')!
+    const result = await tool.execute({ provider_id: 'stub', capability: 't2i' }, execFor('s1')) as {
+      provider_id: string; capability: string; endpoints: EndpointSpec[]
+    }
+    expect(result.provider_id).toBe('stub')
+    expect(result.capability).toBe('t2i')
+    expect(result.endpoints).toHaveLength(1)
+    expect(result.endpoints[0]!.path).toBe('/v1/images/generations')
+    expect(result.endpoints[0]!.response.kind).toBe('b64_json_array')
+    expect(result.endpoints[0]!.response.path).toBe('data[0].b64_json')
+  })
+
+  it('aigc_get_endpoint_details returns empty for a capability the provider does not support', async () => {
+    const tool = ctx.registered.get('aigc_get_endpoint_details')!
+    const result = await tool.execute({ provider_id: 'stub', capability: 'tts' }, execFor('s1')) as {
+      endpoints: EndpointSpec[]
+    }
+    expect(result.endpoints).toEqual([])
+  })
+
+  it('aigc_get_endpoint_details rejects invalid capability enum', async () => {
+    const tool = ctx.registered.get('aigc_get_endpoint_details')!
+    // The framework's schema validator (enum constraint) rejects 'bogus' before execute runs.
+    await expect(tool.execute({ provider_id: 'stub', capability: 'bogus' }, execFor('s1'))).rejects.toThrow()
+  })
+
+  it('aigc_probe_endpoint detects OpenAI b64_json_array shape from a stub response', async () => {
+    const tool = ctx.registered.get('aigc_probe_endpoint')!
+    const result = await tool.execute({
+      provider_id: 'stub',
+      path: '/v1/images/generations',
+      method: 'POST',
+      test_body: { prompt: 'test', size: '1024x1024' },
+    }, execFor('s1')) as {
+      ok: boolean; status: number; content_type: string
+      detected: { responseKind: string; responsePath?: string }
+      body_preview: string
+    }
+    expect(result.ok).toBe(true)
+    expect(result.status).toBe(200)
+    // The stub returns {data:[{b64_json:...}]} JSON → detected as b64_json_array @ data[0].b64_json.
+    expect(result.detected.responseKind).toBe('b64_json_array')
+    expect(result.detected.responsePath).toBe('data[0].b64_json')
+  })
+
+  it('aigc_probe_endpoint detects binary from a stub video response', async () => {
+    const tool = ctx.registered.get('aigc_probe_endpoint')!
+    const result = await tool.execute({
+      provider_id: 'stub',
+      path: '/v1/videos/generations',
+      method: 'POST',
+      test_body: { prompt: 'test' },
+    }, execFor('s1')) as {
+      ok: boolean; detected: { responseKind: string }
+    }
+    expect(result.ok).toBe(true)
+    // The stub returns video/mp4 binary → detected as binary.
+    expect(result.detected.responseKind).toBe('binary')
+  })
+
+  it('aigc_probe_endpoint rejects unknown provider ids', async () => {
+    const tool = ctx.registered.get('aigc_probe_endpoint')!
+    await expect(tool.execute({ provider_id: 'nope', path: '/x' }, execFor('s1'))).rejects.toThrow(AigcError)
   })
 
   // ── aigc_reroll ──────────────────────────────────────────────────────────
@@ -1402,5 +1589,45 @@ describe('registerTools (real endpoint through mocked fetch)', () => {
     }
     expect(result.providers[0]!.isStub).toBe(false)
     expect(result.providers[0]!.endpoint).toBe('https://example.com')
+  })
+
+  it('aigc_http_request uses EndpointSpec.response to process the response (spec-driven b64 extraction)', async () => {
+    // Configure a provider with an EndpointSpec for /v1/images/generations using
+    // a NON-OpenAI path (result.image instead of data[0].b64_json). The spec-driven
+    // extraction path should decode the b64 from result.image and save it as PNG.
+    const customProvider: ResolvedAigcProvider = {
+      ...REAL_PROVIDER,
+      id: 'custom-spec',
+      endpoints: [{
+        path: '/v1/images/generations',
+        method: 'POST',
+        capability: 't2i',
+        response: { kind: 'b64_json_field', path: 'result.image' },
+      }],
+    }
+    const customCtx = mockCtx()
+    const register = registerAll(customCtx, [customProvider], canvas, cwd)
+    try {
+      const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+      const b64 = pngBytes.toString('base64')
+      fetchMock.mockResolvedValue(new Response(JSON.stringify({ result: { image: b64 } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      const tool = customCtx.registered.get('aigc_http_request')!
+      const result = await tool.execute({
+        provider_id: 'custom-spec',
+        method: 'POST',
+        path: '/v1/images/generations',
+        json_body: { prompt: 'test' },
+      }, execFor('s1')) as { ok: boolean; kind: string; content_type: string; file_path: string; file_size: number }
+      expect(result.ok).toBe(true)
+      expect(result.kind).toBe('image')
+      expect(result.content_type).toBe('image/png')
+      expect(result.file_path).toMatch(/\.png$/)
+      expect(result.file_size).toBe(pngBytes.byteLength)
+    } finally {
+      register.dispose()
+    }
   })
 })

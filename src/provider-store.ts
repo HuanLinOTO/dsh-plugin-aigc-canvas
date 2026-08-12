@@ -13,6 +13,8 @@ import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import type { AigcProvider, ResolvedAigcProvider } from './config.js'
 import { validateProviderId } from './config.js'
+import type { EndpointSpec } from './endpoint-catalog.js'
+import { deriveInstructionsFromEndpoints } from './endpoint-catalog.js'
 
 /** Directory for persisted AIGC canvas state (under the DSH user dir). */
 const DATA_DIR = join(homedir(), '.dsh', 'aigc-canvas')
@@ -71,6 +73,11 @@ export class ProviderStore {
         // builtin is a seed-layer hint: restore it from the seed even when
         // the provider came from disk (a persisted file never marks builtin).
         builtin: seedBuiltin.get(p.id) ?? false,
+        endpoints: p.endpoints ?? [],
+        priority: p.priority ?? 100,
+        costPerCall: p.costPerCall ?? 0,
+        avgLatencyMs: p.avgLatencyMs ?? 0,
+        qualityHint: p.qualityHint ?? 'balanced',
       }
       this.providers.set(resolved.id, resolved)
     }
@@ -111,6 +118,11 @@ export class ProviderStore {
         name: provider.auth?.name ?? '',
       },
       builtin: false,
+      endpoints: provider.endpoints ?? [],
+      priority: provider.priority ?? 100,
+      costPerCall: provider.costPerCall ?? 0,
+      avgLatencyMs: provider.avgLatencyMs ?? 0,
+      qualityHint: provider.qualityHint ?? 'balanced',
     }
     this.providers.set(stored.id, stored)
     this.persist()
@@ -138,6 +150,11 @@ export class ProviderStore {
         name: provider.auth?.name ?? existing.auth.name,
       },
       builtin: existing.builtin,
+      endpoints: provider.endpoints ?? existing.endpoints,
+      priority: provider.priority ?? existing.priority,
+      costPerCall: provider.costPerCall ?? existing.costPerCall,
+      avgLatencyMs: provider.avgLatencyMs ?? existing.avgLatencyMs,
+      qualityHint: provider.qualityHint ?? existing.qualityHint,
     }
     this.providers.set(stored.id, stored)
     this.persist()
@@ -154,6 +171,30 @@ export class ProviderStore {
       return { ok: false, error: `provider id not found: ${id}` }
     }
     const stored: ResolvedAigcProvider = { ...existing, instructions }
+    this.providers.set(stored.id, stored)
+    this.persist()
+    return { ok: true, providers: this.list() }
+  }
+
+  /**
+   * Replace a provider's structured endpoint catalog (called by the model's
+   * aigc_provider_set_endpoints tool after probing the API). Also auto-
+   * derives a short `instructions` string from the catalog so legacy agent
+   * prompts that read `instructions` stay in sync (per doc 03 §3 +
+   * doc 06 decision 6: coexist + auto-derive).
+   */
+  setEndpoints(id: string, endpoints: readonly EndpointSpec[]): ProviderMutationResult {
+    const existing = this.providers.get(id)
+    if (existing === undefined) {
+      return { ok: false, error: `provider id not found: ${id}` }
+    }
+    const derived = deriveInstructionsFromEndpoints(endpoints)
+    const instructions = derived !== '' ? derived : existing.instructions
+    const stored: ResolvedAigcProvider = {
+      ...existing,
+      endpoints: [...endpoints],
+      instructions,
+    }
     this.providers.set(stored.id, stored)
     this.persist()
     return { ok: true, providers: this.list() }
@@ -208,6 +249,12 @@ function loadPersistedSync(dataPath: string): readonly AigcProvider[] | null {
             name: typeof (rec.auth as Record<string, unknown>).name === 'string' ? (rec.auth as Record<string, unknown>).name as string : '',
           },
         } : {}),
+        // Structured catalog fields (backward compat: missing → defaults).
+        ...(Array.isArray(rec.endpoints) ? { endpoints: rec.endpoints as EndpointSpec[] } : {}),
+        ...(typeof rec.priority === 'number' ? { priority: rec.priority } : {}),
+        ...(typeof rec.costPerCall === 'number' ? { costPerCall: rec.costPerCall } : {}),
+        ...(typeof rec.avgLatencyMs === 'number' ? { avgLatencyMs: rec.avgLatencyMs } : {}),
+        ...(typeof rec.qualityHint === 'string' ? { qualityHint: rec.qualityHint as AigcProvider['qualityHint'] } : {}),
       })
     }
     return providers

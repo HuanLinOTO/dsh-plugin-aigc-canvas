@@ -8,11 +8,21 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProviderStore } from '../src/provider-store.js'
 import type { AigcProvider } from '../src/config.js'
+import type { EndpointSpec } from '../src/endpoint-catalog.js'
 
 const SEED: readonly AigcProvider[] = [
   { id: 'stub', name: '', endpoint: 'stub://aigc-backend', apiKey: '', instructions: 'seed-instructions', builtin: true },
   { id: 'volcano', name: 'Volcano', endpoint: 'https://example.com', apiKey: 'sk-seed', instructions: '', builtin: true },
 ]
+
+const T2I_ENDPOINT: EndpointSpec = {
+  path: '/v1/images/generations',
+  method: 'POST',
+  capability: 't2i',
+  params: [{ name: 'prompt', type: 'string', required: true }],
+  response: { kind: 'b64_json_array', path: 'data[0].b64_json' },
+  acceptsCanvasRef: true,
+}
 
 describe('ProviderStore persistence', () => {
   let dir: string
@@ -69,5 +79,39 @@ describe('ProviderStore persistence', () => {
 
     const restarted = new ProviderStore(SEED, dataPath)
     expect(restarted.list().map(p => p.id)).toEqual(['stub'])
+  })
+
+  it('setEndpoints persists the structured catalog + auto-derives instructions', async () => {
+    const store = new ProviderStore(SEED, dataPath)
+    const result = store.setEndpoints('volcano', [T2I_ENDPOINT])
+    expect(result.ok).toBe(true)
+    expect(store.get('volcano')!.endpoints).toHaveLength(1)
+    expect(store.get('volcano')!.endpoints[0]!.path).toBe('/v1/images/generations')
+    // Instructions are auto-derived from the catalog (one line per endpoint).
+    expect(store.get('volcano')!.instructions).toContain('/v1/images/generations')
+    expect(store.get('volcano')!.instructions).toContain('b64_json_array')
+    // Wait for the fire-and-forget write to land.
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    // The catalog + derived instructions survive a restart.
+    const restarted = new ProviderStore(SEED, dataPath)
+    expect(restarted.get('volcano')!.endpoints).toHaveLength(1)
+    expect(restarted.get('volcano')!.endpoints[0]!.capability).toBe('t2i')
+    expect(restarted.get('volcano')!.instructions).toContain('/v1/images/generations')
+  })
+
+  it('setEndpoints with empty array preserves the existing instructions', () => {
+    const store = new ProviderStore(SEED, dataPath)
+    store.setInstructions('stub', 'manual-instructions')
+    store.setEndpoints('stub', [])
+    // Empty endpoints → instructions stay as-is (no auto-derive).
+    expect(store.get('stub')!.instructions).toBe('manual-instructions')
+    expect(store.get('stub')!.endpoints).toEqual([])
+  })
+
+  it('setEndpoints fails for unknown provider ids', () => {
+    const store = new ProviderStore(SEED, dataPath)
+    const result = store.setEndpoints('nope', [T2I_ENDPOINT])
+    expect(result.ok).toBe(false)
   })
 })

@@ -40,7 +40,7 @@ import {
 } from './canvas-registry.js'
 import type { AigcAgent, AigcUserMessage } from './context-types.js'
 import { isTrustedApiRequest } from './trust-fence.js'
-import { registerTools } from './tools.js'
+import { registerTools, type ProviderInfo } from './tools.js'
 import { AigcError, readJsonBody, requireString, writeError, writeJson, writeOk } from './wire.js'
 
 export { Config }
@@ -287,7 +287,7 @@ export function apply(ctx: Context, config?: AigcCanvasConfig): void {
   }
 
   // Provider info list for the aigc_get_provider_info tool.
-  const listProviders = (): readonly { id: string; name: string; endpoint: string; instructions: string; isStub: boolean; isDefault: boolean }[] => {
+  const listProviders = (): readonly ProviderInfo[] => {
     const list = store.list()
     const defaultId = store.defaultProvider()?.id
     return list.map(p => ({
@@ -297,6 +297,11 @@ export function apply(ctx: Context, config?: AigcCanvasConfig): void {
       instructions: p.instructions,
       isStub: p.endpoint === '' || p.endpoint === 'stub://aigc-backend',
       isDefault: p.id === defaultId,
+      endpoints: p.endpoints,
+      priority: p.priority,
+      costPerCall: p.costPerCall,
+      avgLatencyMs: p.avgLatencyMs,
+      qualityHint: p.qualityHint,
     }))
   }
 
@@ -397,11 +402,12 @@ export function apply(ctx: Context, config?: AigcCanvasConfig): void {
     },
   }), 'dsh-aigc-canvas: canvas push WebSocket')
 
-  // ── Register the seven model-facing tools ───────────────────────────────
+  // ── Register the model-facing tools ───────────────────────────────────
   ctx.effect(() => registerTools(
     ctx,
     getProvider,
     (id, instructions) => store.setInstructions(id, instructions),
+    (id, endpoints) => store.setEndpoints(id, endpoints),
     listProviders,
     canvas,
     (sessionId) => sessionCwdOf(ctx, sessionId),

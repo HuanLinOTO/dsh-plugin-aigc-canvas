@@ -60,6 +60,17 @@ import {
   consumeRequestSnapshot,
   type RequestSnapshot,
 } from './request-snapshot.js'
+import type { Capability, EndpointSpec, ResponseKind } from './endpoint-catalog.js'
+import {
+  CAPABILITIES,
+  RESPONSE_KINDS,
+  capabilitiesOf,
+  endpointsByCapability,
+  findEndpointSpec,
+  extractByPath,
+  detectResponseShape,
+  deriveInstructionsFromEndpoints,
+} from './endpoint-catalog.js'
 
 /** Maximum length of a prompt title (derived from the prompt text). */
 const TITLE_MAX = 80
@@ -133,6 +144,16 @@ export interface ProviderInfo {
   instructions: string
   isStub: boolean
   isDefault: boolean
+  /** Structured capability catalog (empty when the provider uses legacy instructions only). */
+  endpoints: EndpointSpec[]
+  /** Selection priority (smaller = higher). */
+  priority: number
+  /** Cost per call in USD (0 when unknown). */
+  costPerCall: number
+  /** Average latency in ms (0 when unknown). */
+  avgLatencyMs: number
+  /** Quality hint. */
+  qualityHint: 'fast' | 'balanced' | 'quality'
 }
 
 /**
@@ -343,10 +364,25 @@ function mimeFromExt(filePath: string): string {
  * @param getMediaLimit - live cap on bytes the http tool may write to disk.
  * @returns a disposer that unregisters all tools.
  */
+/**
+ * Register the tools against the host tool registry.
+ *
+ * @param ctx - host plugin context (carries the tools service).
+ * @param getProvider - live provider getter (takes optional provider id).
+ * @param setInstructions - persists usage instructions for one provider (the host's ProviderStore).
+ * @param setEndpoints - persists the structured endpoint catalog for one provider (auto-derives instructions).
+ * @param listProviders - returns info for all providers (for aigc_get_provider_info).
+ * @param canvas - the canvas registry service (host-owned state).
+ * @param resolveCwd - live cwd resolver for one session id.
+ * @param getTimeoutMs - live per-request timeout for aigc_http_request.
+ * @param getMediaLimit - live cap on bytes the http tool may write to disk.
+ * @returns a disposer that unregisters all tools.
+ */
 export function registerTools(
   ctx: Context,
   getProvider: (providerId?: string) => ResolvedAigcProvider,
   setInstructions: (id: string, instructions: string) => { ok: boolean; error?: string },
+  setEndpoints: (id: string, endpoints: readonly EndpointSpec[]) => { ok: boolean; error?: string },
   listProviders: () => readonly ProviderInfo[],
   canvas: AigcCanvasService,
   resolveCwd: (sessionId: string) => string,
@@ -365,16 +401,21 @@ export function registerTools(
   register(defineTool({
     name: 'aigc_get_provider_info',
     description:
-      'List all configured AIGC providers with their id, name, endpoint, an instructions PREVIEW, and stub status. '
+      'List all configured AIGC providers with their id, name, endpoint, an instructions PREVIEW, stub status, '
+      + 'AND a structured capability summary (capabilities array + priority + qualityHint + costPerCall). '
+      + 'Also returns a top-level `capabilityMap` grouping providers by capability (sorted by priority) so you can '
+      + 'pick the best provider for a given task without parsing natural language. '
       + 'Call this FIRST before generating anything. '
       + 'To use a provider: call aigc_http_request with its id as provider_id — the endpoint and apiKey are attached '
       + 'automatically, so you never need to see or forward the apiKey. '
-      + 'When a provider\'s instructions are empty, probe its API yourself (aigc_http_request) and then record '
-      + 'how to call it via aigc_provider_set_instructions. '
+      + 'When a provider\'s instructions are empty AND its endpoints are empty, probe its API yourself '
+      + '(aigc_http_request) and then record the catalog via aigc_provider_set_endpoints (preferred) or the legacy '
+      + 'aigc_provider_set_instructions. '
       + 'The `instructions` field shown here is a PREVIEW (first '
       + `${INSTRUCTIONS_PREVIEW_CHARS} chars + total count) — when you need the full instructions `
       + '(e.g. to recall exact endpoint paths / params for an already-initialized provider), call '
       + 'aigc_provider_get_instructions with the provider_id. '
+      + 'For the full structured EndpointSpec[] of one provider+capability, call aigc_get_endpoint_details. '
       + 'When the endpoint is "stub://aigc-backend", aigc_http_request returns synthetic media (no real API calls) — '
       + 'useful for dry runs. '
       + 'Generated files are placed on the canvas with aigc_canvas_place (filePath + position), and elements can be '
@@ -399,31 +440,59 @@ export function registerTools(
                 instructions_total_chars: { type: 'integer', required: true, description: 'Total character count of the full instructions (0 when uninitialized).' },
                 isStub: { type: 'boolean', required: true, description: 'Whether the stub backend is active (no real API calls).' },
                 isDefault: { type: 'boolean', required: true, description: 'Whether this is the default provider (used when provider_id is omitted).' },
+                capabilities: {
+                  type: 'array',
+                  required: true,
+                  items: { type: 'string', enum: CAPABILITIES as readonly string[] },
+                  description: 'Distinct capabilities this provider supports (derived from its endpoints catalog). Empty when the provider uses legacy instructions only.',
+                },
+                endpoint_count: { type: 'integer', required: true, description: 'Number of structured EndpointSpec entries (0 when using legacy instructions).' },
+                priority: { type: 'integer', required: true, description: 'Selection priority (smaller = higher; default 100).' },
+                qualityHint: { type: 'string', required: true, enum: ['fast', 'balanced', 'quality'], description: 'Quality hint for picking fast vs. quality providers.' },
+                costPerCall: { type: 'number', required: true, description: 'Cost per call in USD (0 when unknown).' },
               },
             },
+          },
+          capabilityMap: {
+            type: 'json',
+            required: true,
+            description: 'Providers grouped by capability, sorted by priority (smallest first). Use this to pick the '
+              + 'best provider for a task: capabilityMap.t2i[0] is the highest-priority t2i provider. '
+              + 'Filter by qualityHint when the user asks for "high quality" or "fast". '
+              + 'Shape: { [capability: string]: Array<{ providerId, priority, qualityHint, costPerCall }> }.',
           },
         },
       },
       render: (_args, value) => {
-        const v = value as { providers: Array<{ id: string; name: string; endpoint: string; instructions: string; instructions_total_chars: number; isStub: boolean; isDefault: boolean }> }
+        const v = value as {
+          providers: Array<{ id: string; name: string; endpoint: string; instructions: string; instructions_total_chars: number; isStub: boolean; isDefault: boolean; capabilities: string[]; priority: number; qualityHint: string }>
+          capabilityMap: Record<string, Array<{ providerId: string; priority: number; qualityHint: string }>>
+        }
         if (v.providers.length === 0) {
           return [{ type: 'text', text: 'No AIGC providers configured. Add one in the settings page.' }]
         }
-        const lines = v.providers.map(p =>
-          `  ${p.isDefault ? '* ' : '  '}${p.id}  "${p.name || '(unnamed)'}"  endpoint: ${p.endpoint}  stub: ${p.isStub}`
-          + (p.instructions !== '' ? `\n    instructions (${p.instructions_total_chars} chars): ${p.instructions}` : '\n    instructions: (empty — probe the API with aigc_http_request, then record them via aigc_provider_set_instructions)'),
+        const lines = v.providers.map(p => {
+          const caps = p.capabilities.length > 0 ? ` caps:[${p.capabilities.join(',')}]` : ''
+          const pri = ` pri:${p.priority}`
+          const q = ` ${p.qualityHint}`
+          return `  ${p.isDefault ? '* ' : '  '}${p.id}  "${p.name || '(unnamed)'}"  endpoint: ${p.endpoint}  stub: ${p.isStub}${caps}${pri}${q}`
+            + (p.instructions !== '' ? `\n    instructions (${p.instructions_total_chars} chars): ${p.instructions}` : '\n    instructions: (empty — probe the API with aigc_http_request, then record them via aigc_provider_set_endpoints)')
+        })
+        const capMapLines = Object.entries(v.capabilityMap).map(([cap, list]) =>
+          `  ${cap}: ${list.map(p => `${p.providerId}(pri:${p.priority},${p.qualityHint})`).join(' | ') || '(no providers)'}`,
         )
         return [{
           type: 'text',
-          text: `AIGC providers (${v.providers.length}):\n${lines.join('\n')}\n\nCall aigc_http_request with the desired provider's id; endpoint + apiKey are attached automatically. For full instructions of one provider, call aigc_provider_get_instructions.`,
+          text: `AIGC providers (${v.providers.length}):\n${lines.join('\n')}\n\nCapability map:\n${capMapLines.join('\n')}\n\nCall aigc_http_request with the desired provider's id; endpoint + apiKey are attached automatically. For full instructions or endpoint details, call aigc_provider_get_instructions / aigc_get_endpoint_details.`,
         }]
       },
     },
     execute: async (_args, exec) => {
       exec.signal.throwIfAborted()
       const list = listProviders()
-      const projected = list.map(p => {
+      const providersProjected = list.map(p => {
         const { preview, totalChars } = instructionsPreviewOf(p.instructions)
+        const caps = capabilitiesOf(p.endpoints)
         return {
           id: p.id,
           name: p.name,
@@ -432,9 +501,90 @@ export function registerTools(
           instructions_total_chars: totalChars,
           isStub: p.isStub,
           isDefault: p.isDefault,
+          capabilities: caps,
+          endpoint_count: p.endpoints.length,
+          priority: p.priority,
+          qualityHint: p.qualityHint,
+          costPerCall: p.costPerCall,
         }
       })
-      return Promise.resolve({ providers: projected })
+      // Build the capabilityMap: group providers by capability, sorted by priority.
+      const capMap: Record<string, Array<{ providerId: string; priority: number; qualityHint: string; costPerCall: number }>> = {}
+      for (const p of list) {
+        for (const cap of capabilitiesOf(p.endpoints)) {
+          if (capMap[cap] === undefined) capMap[cap] = []
+          capMap[cap].push({
+            providerId: p.id,
+            priority: p.priority,
+            qualityHint: p.qualityHint,
+            costPerCall: p.costPerCall,
+          })
+        }
+      }
+      // Sort each capability's providers by priority (smallest first).
+      for (const arr of Object.values(capMap)) {
+        arr.sort((a, b) => a.priority - b.priority)
+      }
+      return Promise.resolve({ providers: providersProjected, capabilityMap: capMap })
+    },
+  }))
+
+  // ══ aigc_get_endpoint_details ═══════════════════════════════════════════
+  register(defineTool({
+    name: 'aigc_get_endpoint_details',
+    description:
+      'Fetch the full structured EndpointSpec[] for one (provider_id, capability) pair. '
+      + 'aigc_get_provider_info only returns a capability list (which providers support t2i/t2v/...); this tool '
+      + 'returns the detailed endpoint paths, parameter schemas, and response shape declarations you need to '
+      + 'construct a correct aigc_http_request call (path, method, params, response handling). '
+      + 'Returns an empty array when the provider has no structured catalog for that capability (legacy '
+      + 'instructions-only mode) — in that case, call aigc_provider_get_instructions for the free-form text.',
+    parameters: {
+      provider_id: { type: 'string', required: true, description: 'The provider id (from aigc_get_provider_info).' },
+      capability: {
+        type: 'string',
+        required: true,
+        enum: CAPABILITIES as readonly string[],
+        description: 'The capability to fetch endpoint details for (t2i / t2v / tts / ...).',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          provider_id: { type: 'string', required: true },
+          capability: { type: 'string', required: true, enum: CAPABILITIES as readonly string[] },
+          endpoints: {
+            type: 'array',
+            required: true,
+            description: 'EndpointSpec entries for this provider+capability. Empty when the provider uses legacy instructions only.',
+            items: { type: 'json' },
+          },
+        },
+      },
+      render: textRender((v: { provider_id: string; capability: string; endpoints: EndpointSpec[] }) =>
+        v.endpoints.length === 0
+          ? `Provider "${v.provider_id}" has no structured endpoints for capability "${v.capability}" (legacy instructions-only mode). Call aigc_provider_get_instructions for the free-form text.`
+          : `Provider "${v.provider_id}" capability "${v.capability}" (${v.endpoints.length} endpoint(s)):\n${v.endpoints.map(ep => `  ${ep.method} ${ep.path} -> ${ep.response.kind}`).join('\n')}`,
+      ),
+    },
+    execute: (args: { provider_id: string; capability: string }) => {
+      if (typeof args.provider_id !== 'string' || args.provider_id === '') {
+        throw new AigcError('bad-request', 'provider_id is required')
+      }
+      if (typeof args.capability !== 'string' || !(CAPABILITIES as readonly string[]).includes(args.capability)) {
+        throw new AigcError('bad-request', `capability must be one of: ${(CAPABILITIES as readonly string[]).join(', ')}`)
+      }
+      const provider = getProvider(args.provider_id) // throws for unknown ids
+      const cap = args.capability as Capability
+      const byCap = endpointsByCapability(provider.endpoints)
+      const endpoints = byCap.get(cap) ?? []
+      return Promise.resolve({
+        provider_id: args.provider_id,
+        capability: cap,
+        endpoints,
+      })
     },
   }))
 
@@ -649,7 +799,27 @@ export function registerTools(
       switch (result.kind) {
         case 'json':
         case 'text': {
-          // OpenAI image endpoints return JSON like {data:[{b64_json:"..."}]}.
+          // Spec-driven response handling: when the provider has an EndpointSpec
+          // for this (path, method), use spec.response.kind + spec.response.path
+          // to process the response. This replaces the legacy OpenAI-format
+          // sniff (extractOpenAIB64Image) for providers with a configured catalog.
+          const methodUsed = (args.method ?? (body !== undefined ? 'POST' : 'GET')).toUpperCase()
+          const spec = findEndpointSpec(provider.endpoints, args.path, methodUsed)
+          if (result.kind === 'json' && spec !== undefined) {
+            const specResult = await processResponseBySpec(spec, result.text, provider, { timeoutMs: getTimeoutMs(), signal: exec.signal }, sessionId, cwd)
+            if (specResult !== null) {
+              recordSnapshot(specResult.filePath, specResult.size, specResult.kind)
+              return {
+                ok: true,
+                status: result.status,
+                kind: specResult.kind,
+                content_type: specResult.contentType,
+                file_path: specResult.filePath,
+                file_size: specResult.size,
+              }
+            }
+          }
+          // Legacy: OpenAI image endpoints return JSON like {data:[{b64_json:"..."}]}.
           // Auto-extract the base64 payload to a file so the model gets a
           // file_path it can pass directly to aigc_canvas_place — without
           // having to manually decode base64 and write a file itself.
@@ -806,6 +976,223 @@ export function registerTools(
       const provider = getProvider(args.provider_id) // throws for unknown ids
       const instructions = provider.instructions
       return Promise.resolve({ provider_id: args.provider_id, instructions, total_chars: instructions.length })
+    },
+  }))
+
+  // ══ aigc_provider_set_endpoints ═════════════════════════════════════════
+  register(defineTool({
+    name: 'aigc_provider_set_endpoints',
+    description:
+      'Record the STRUCTURED capability catalog for one provider: a list of EndpointSpec entries describing each '
+      + 'endpoint\'s path, method, capability, parameters, and response shape. '
+      + 'This is the preferred replacement for aigc_provider_set_instructions (which stores free-form text): '
+      + 'the structured catalog lets aigc_get_provider_info return a capabilityMap, lets aigc_get_endpoint_details '
+      + 'return exact endpoint specs, and lets aigc_http_request process responses by spec.response.kind instead of '
+      + 'the legacy OpenAI-format sniff. '
+      + 'The legacy `instructions` field is AUTO-DERIVED from the catalog (one compact line per endpoint) so old '
+      + 'agent prompts that read `instructions` keep working. '
+      + 'Call this after probing a provider\'s API with aigc_http_request + aigc_probe_endpoint.',
+    parameters: {
+      provider_id: { type: 'string', required: true, description: 'The provider id to update (from aigc_get_provider_info).' },
+      endpoints: {
+        type: 'json',
+        required: true,
+        description: 'Array of EndpointSpec objects. Each entry: { path, method, capability, params?, response: { kind, path? }, acceptsCanvasRef?, notes? }. '
+          + `capability enum: ${(CAPABILITIES as readonly string[]).join(' | ')}. `
+          + `response.kind enum: ${(RESPONSE_KINDS as readonly string[]).join(' | ')}. `
+          + 'response.path is required for b64_json_array / b64_json_field / url_field (e.g. "data[0].b64_json"); ignored for binary and json_text. '
+          + 'params is an array of { name, type, required, default?, enum?, min?, max?, description? }. '
+          + 'Example: [{ path: "/v1/images/generations", method: "POST", capability: "t2i", params: [{name:"prompt",type:"string",required:true},{name:"size",type:"string",default:"1024x1024"}], response: { kind: "b64_json_array", path: "data[0].b64_json" }, acceptsCanvasRef: true }]',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          provider_id: { type: 'string', required: true },
+          endpoint_count: { type: 'integer', required: true, description: 'Number of EndpointSpec entries saved.' },
+          derived_instructions_chars: { type: 'integer', required: true, description: 'Character count of the auto-derived instructions string (also saved to the legacy field).' },
+        },
+      },
+      render: textRender((v: { provider_id: string; endpoint_count: number; derived_instructions_chars: number }) =>
+        `Saved ${v.endpoint_count} endpoint(s) for provider "${v.provider_id}" (auto-derived instructions: ${v.derived_instructions_chars} chars).`,
+      ),
+    },
+    execute: (args: { provider_id: string; endpoints: unknown }) => {
+      if (typeof args.provider_id !== 'string' || args.provider_id === '') {
+        throw new AigcError('bad-request', 'provider_id is required')
+      }
+      if (!Array.isArray(args.endpoints)) {
+        throw new AigcError('bad-request', 'endpoints must be an array of EndpointSpec objects')
+      }
+      // Validate + coerce each entry to EndpointSpec.
+      const endpoints: EndpointSpec[] = []
+      for (const raw of args.endpoints) {
+        if (typeof raw !== 'object' || raw === null) {
+          throw new AigcError('bad-request', 'each endpoint must be an object')
+        }
+        const rec = raw as Record<string, unknown>
+        if (typeof rec.path !== 'string' || rec.path === '') {
+          throw new AigcError('bad-request', 'each endpoint.path must be a non-empty string')
+        }
+        if (typeof rec.method !== 'string' || !['GET', 'POST', 'PUT', 'PATCH'].includes(rec.method)) {
+          throw new AigcError('bad-request', `endpoint.method must be one of GET/POST/PUT/PATCH (got: ${String(rec.method)})`)
+        }
+        if (typeof rec.capability !== 'string' || !(CAPABILITIES as readonly string[]).includes(rec.capability)) {
+          throw new AigcError('bad-request', `endpoint.capability must be one of: ${(CAPABILITIES as readonly string[]).join(', ')}`)
+        }
+        if (typeof rec.response !== 'object' || rec.response === null) {
+          throw new AigcError('bad-request', 'endpoint.response must be an object { kind, path? }')
+        }
+        const resp = rec.response as Record<string, unknown>
+        if (typeof resp.kind !== 'string' || !(RESPONSE_KINDS as readonly string[]).includes(resp.kind)) {
+          throw new AigcError('bad-request', `endpoint.response.kind must be one of: ${(RESPONSE_KINDS as readonly string[]).join(', ')}`)
+        }
+        endpoints.push({
+          path: rec.path,
+          method: rec.method as EndpointSpec['method'],
+          capability: rec.capability as Capability,
+          ...(Array.isArray(rec.params) ? { params: rec.params as EndpointSpec['params'] } : {}),
+          response: {
+            kind: resp.kind as ResponseKind,
+            ...(typeof resp.path === 'string' ? { path: resp.path } : {}),
+          },
+          ...(typeof rec.acceptsCanvasRef === 'boolean' ? { acceptsCanvasRef: rec.acceptsCanvasRef } : {}),
+          ...(typeof rec.notes === 'string' ? { notes: rec.notes } : {}),
+        })
+      }
+      getProvider(args.provider_id) // throws for unknown ids
+      const result = setEndpoints(args.provider_id, endpoints)
+      if (!result.ok) throw new AigcError('bad-request', result.error ?? 'cannot save endpoints')
+      const derived = deriveInstructionsFromEndpoints(endpoints)
+      return Promise.resolve({
+        ok: true,
+        provider_id: args.provider_id,
+        endpoint_count: endpoints.length,
+        derived_instructions_chars: derived.length,
+      })
+    },
+  }))
+
+  // ══ aigc_probe_endpoint ═════════════════════════════════════════════════
+  register(defineTool({
+    name: 'aigc_probe_endpoint',
+    description:
+      'Probe one provider endpoint with a minimal test request and auto-detect the response shape (ResponseKind + '
+      + 'payload path). Use this to half-automate the EndpointSpec catalog: send a tiny test body, read the detected '
+      + 'kind + path, then save a full EndpointSpec via aigc_provider_set_endpoints. '
+      + 'The probe sends ONE real API call (costs money); use a minimal test body to keep the cost down. '
+      + 'Binary responses (image/video/audio Content-Type) are detected as kind="binary" from the Content-Type header; '
+      + 'JSON responses are sniffed by heuristics (OpenAI b64_json_array, url_field, chat shape, single b64 field, etc.).',
+    parameters: {
+      provider_id: { type: 'string', required: true, description: 'The provider id to probe (from aigc_get_provider_info).' },
+      path: { type: 'string', required: true, description: 'Endpoint path to probe, e.g. "/v1/images/generations".' },
+      method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH'], description: 'HTTP method. Defaults to POST when a test_body is provided, else GET.' },
+      test_body: { type: 'json', description: 'Minimal test request body (object/array or JSON string). Keep it tiny to minimize API cost. Example: { prompt: "test", size: "1024x1024" }.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true, description: 'Whether the probe request returned 2xx.' },
+          status: { type: 'integer', required: true, description: 'HTTP status code of the probe response.' },
+          content_type: { type: 'string', required: true, description: 'Response Content-Type header.' },
+          detected: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            description: 'Auto-detected response shape (use these values to fill an EndpointSpec.response).',
+            properties: {
+              responseKind: { type: 'string', required: true, enum: RESPONSE_KINDS as readonly string[] },
+              responsePath: { type: 'string', description: 'Detected payload path (e.g. "data[0].b64_json"). Undefined for binary and json_text.' },
+              sampleField: { type: 'string', description: 'Sample field name detected (for debugging the heuristic).' },
+            },
+          },
+          body_preview: { type: 'string', required: true, description: 'First ~500 chars of the response body (for the model to verify the detection).' },
+        },
+      },
+      render: textRender((v: { ok: boolean; status: number; content_type: string; detected: { responseKind: string; responsePath?: string }; body_preview: string }) =>
+        v.ok
+          ? `Probe ${v.status} (${v.content_type}) → detected ${v.detected.responseKind}${v.detected.responsePath !== undefined ? ` @ ${v.detected.responsePath}` : ''}\nBody preview: ${v.body_preview.slice(0, 200)}`
+          : `Probe FAILED: HTTP ${v.status} (${v.content_type}). Body: ${v.body_preview.slice(0, 200)}`,
+      ),
+    },
+    async execute(args: {
+      provider_id: string
+      path: string
+      method?: string
+      test_body?: unknown
+    }, exec) {
+      exec.signal.throwIfAborted()
+      if (typeof args.provider_id !== 'string' || args.provider_id === '') {
+        throw new AigcError('bad-request', 'provider_id is required')
+      }
+      if (typeof args.path !== 'string' || args.path === '') {
+        throw new AigcError('bad-request', 'path is required')
+      }
+      const sessionId = sessionIdOf(exec)
+      void sessionId // probe doesn't place files; sessionId is only for the abort scope
+      const provider = getProvider(args.provider_id)
+      // Build the test body string.
+      let body: string | undefined
+      if (args.test_body !== undefined) {
+        if (typeof args.test_body === 'string') {
+          body = args.test_body
+        } else {
+          try {
+            body = JSON.stringify(args.test_body)
+          } catch (e) {
+            throw new AigcError('bad-request', `test_body is not serializable: ${e instanceof Error ? e.message : String(e)}`)
+          }
+        }
+      }
+      const method = (args.method ?? (body !== undefined ? 'POST' : 'GET')).toUpperCase()
+      const result = await executeProviderRequest(provider, {
+        method,
+        path: args.path,
+        body,
+      }, { timeoutMs: getTimeoutMs(), signal: exec.signal })
+      if (!result.ok) {
+        return {
+          ok: false,
+          status: result.status,
+          content_type: result.contentType,
+          detected: { responseKind: 'json_text' as ResponseKind },
+          body_preview: result.text.slice(0, 500),
+        }
+      }
+      // Detect the response shape from the Content-Type + body.
+      const mediaType = result.contentType.split(';')[0]!.trim().toLowerCase()
+      const isBinary = mediaType.startsWith('image/') || mediaType.startsWith('video/') || mediaType.startsWith('audio/') || mediaType === 'application/octet-stream'
+      if (isBinary) {
+        return {
+          ok: true,
+          status: result.status,
+          content_type: result.contentType,
+          detected: { responseKind: 'binary' as ResponseKind },
+          body_preview: `(binary ${result.contentType}, ${result.kind === 'json' || result.kind === 'text' ? result.text.length : (result as { bytes?: Buffer }).bytes?.byteLength ?? 0} bytes)`,
+        }
+      }
+      // Text / JSON response — sniff the body.
+      const text = result.kind === 'json' || result.kind === 'text' ? result.text : ''
+      let parsed: unknown
+      try { parsed = JSON.parse(text) } catch { parsed = text }
+      const detected = detectResponseShape(parsed)
+      const sampleField = detected.path ?? ''
+      return {
+        ok: true,
+        status: result.status,
+        content_type: result.contentType,
+        detected: {
+          responseKind: detected.kind,
+          ...(detected.path !== undefined ? { responsePath: detected.path } : {}),
+          ...(sampleField !== '' ? { sampleField } : {}),
+        },
+        body_preview: text.slice(0, 500),
+      }
     },
   }))
 
@@ -1678,6 +2065,107 @@ async function saveRerollResponse(
  */
 let _getMediaLimit: () => number = () => 100 * 1024 * 1024
 function getMediaLimitSafe(): number { return _getMediaLimit() }
+
+/**
+ * Spec-driven response processing: when the provider has an EndpointSpec
+ * for the called (path, method), use spec.response.kind + spec.response.path
+ * to extract the payload from a JSON response body. Returns null when the
+ * spec doesn't apply (e.g. kind is 'json_text' or 'binary' — the caller
+ * falls back to the legacy handling).
+ *
+ * Handles:
+ *  - b64_json_array / b64_json_field: extract the base64 string via
+ *    spec.response.path, decode, save to disk. Returns kind 'image' (or
+ *    video/audio based on magic bytes — see extensionForBinaryKind).
+ *  - url_field: extract the URL via spec.response.path, do a secondary GET
+ *    (same-origin, with provider auth), save the bytes to disk.
+ *  - json_text / binary: returns null (caller falls back to legacy handling).
+ */
+async function processResponseBySpec(
+  spec: EndpointSpec,
+  textBody: string,
+  provider: ResolvedAigcProvider,
+  opts: { timeoutMs: number; signal?: AbortSignal },
+  sessionId: string,
+  cwd: string,
+): Promise<{ filePath: string; size: number; kind: string; contentType: string } | null> {
+  const responseKind = spec.response.kind
+  if (responseKind === 'json_text' || responseKind === 'binary') {
+    // Legacy handling is correct for these kinds.
+    return null
+  }
+  // Parse the JSON body.
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(textBody)
+  } catch {
+    // Body isn't JSON — can't extract; fall back to legacy.
+    return null
+  }
+  if (responseKind === 'b64_json_array' || responseKind === 'b64_json_field') {
+    const path = spec.response.path
+    if (path === undefined || path === '') return null
+    const b64 = extractByPath(parsed, path)
+    if (typeof b64 !== 'string' || b64.length === 0) return null
+    const bytes = Buffer.from(b64, 'base64')
+    if (bytes.byteLength < 8) return null
+    if (bytes.byteLength > getMediaLimitSafe()) {
+      throw new AigcError('backend-error', `extracted payload too large (${bytes.byteLength} bytes > ${getMediaLimitSafe()} limit)`, 413)
+    }
+    // Sniff magic bytes for the extension + content-type.
+    const { ext, contentType, kind } = sniffBytes(bytes)
+    const filePath = await saveResponseToSession(bytes, ext, sessionId, cwd)
+    return { filePath, size: bytes.byteLength, kind, contentType }
+  }
+  if (responseKind === 'url_field') {
+    const path = spec.response.path
+    if (path === undefined || path === '') return null
+    const url = extractByPath(parsed, path)
+    if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) return null
+    // Secondary GET to download the bytes (same-origin enforced by executeProviderRequest).
+    const downloadResult = await executeProviderRequest(provider, {
+      method: 'GET',
+      path: url,
+    }, opts)
+    if (!downloadResult.ok) {
+      throw new AigcError('backend-error', `secondary download failed for ${url}: HTTP ${downloadResult.status}`, downloadResult.status >= 400 && downloadResult.status < 500 ? 400 : 502)
+    }
+    if (downloadResult.kind === 'json' || downloadResult.kind === 'text') {
+      // The "URL" pointed to a text resource, not binary — unexpected. Fall back.
+      return null
+    }
+    // After the text-kind check, downloadResult is ProviderHttpBinary (has .bytes).
+    const bytes = (downloadResult as { bytes: Buffer; size: number; kind: string; contentType: string }).bytes
+    const dlSize = (downloadResult as { size: number }).size
+    const dlKind = (downloadResult as { kind: string }).kind
+    const dlContentType = (downloadResult as { contentType: string }).contentType
+    if (dlSize > getMediaLimitSafe()) {
+      throw new AigcError('backend-error', `downloaded payload too large (${dlSize} bytes > ${getMediaLimitSafe()} limit)`, 413)
+    }
+    const ext = extensionForBinaryKind(dlKind as ProviderBinaryKind, dlContentType)
+    const filePath = await saveResponseToSession(bytes, ext, sessionId, cwd)
+    return { filePath, size: dlSize, kind: dlKind, contentType: dlContentType }
+  }
+  return null
+}
+
+/** Sniff magic bytes to determine extension + content-type + AigcElement kind. */
+function sniffBytes(bytes: Buffer): { ext: string; contentType: string; kind: string } {
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return { ext: 'png', contentType: 'image/png', kind: 'image' }
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return { ext: 'jpg', contentType: 'image/jpeg', kind: 'image' }
+  }
+  if (bytes.byteLength >= 12 && bytes.slice(0, 4).toString('ascii') === 'RIFF' && bytes.slice(8, 12).toString('ascii') === 'WEBP') {
+    return { ext: 'webp', contentType: 'image/webp', kind: 'image' }
+  }
+  if (bytes.slice(0, 6).toString('ascii') === 'GIF89a' || bytes.slice(0, 6).toString('ascii') === 'GIF87a') {
+    return { ext: 'gif', contentType: 'image/gif', kind: 'image' }
+  }
+  // Default to png for unknown image-like payloads.
+  return { ext: 'png', contentType: 'image/png', kind: 'image' }
+}
 
 /** Re-export the projection helpers for the unit tests. */
 export { elementProjection, edgeProjection, titleOf }

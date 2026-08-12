@@ -594,7 +594,7 @@
 .contextMenu {
   position: fixed;
   z-index: 20;
-  min-width: 120px;
+  min-width: 160px;
   background: var(--dsw-alias-bg-layer-2);
   border-radius: 8px;
   box-shadow: var(--dsw-shadow-lv3);
@@ -618,8 +618,76 @@
 }
 
 .contextMenuItem:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* The Delete item keeps the destructive (red) styling from the old
+ * single-item menu so it's visually distinct from the status / agent
+ * actions above the separator. */
+.contextMenuItemDanger:hover {
   background: var(--dsw-alias-state-error-bg);
   color: var(--dsw-alias-state-error-primary);
+}
+
+/* Disabled state (e.g. "Mark as winner" on a prompt element with no media,
+ * or "Edit selected" with no selection). */
+.contextMenuItemDisabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.contextMenuItemDisabled:hover {
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Horizontal rule between action groups (regenerate → download,
+ * promote → status, status → delete). */
+.contextMenuSeparator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--dsw-alias-border-l2);
+  border: none;
+}
+
+/* ── Quick action toolbar (left side of the canvas, per doc 04 §7) ────── */
+
+.toolbar {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  z-index: 8;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--dsw-alias-bg-layer-2);
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+}
+
+.toolbarButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.toolbarButton:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.toolbarButton:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* ── Drag-drop indicator + upload overlay ─────────────────────────────── */

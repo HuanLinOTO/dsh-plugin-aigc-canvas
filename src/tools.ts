@@ -87,6 +87,13 @@ import {
   detectResponseShape,
   deriveInstructionsFromEndpoints,
 } from './endpoint-catalog.js'
+import {
+  PipelineEngine,
+  pipelineStateProjection,
+  type PipelineSpec,
+  type StepOverride,
+  type StepOverrides,
+} from './pipeline.js'
 
 /** Maximum length of a prompt title (derived from the prompt text). */
 const TITLE_MAX = 80
@@ -488,6 +495,7 @@ function parseRecommendation(v: unknown): AssessRecommendation {
  * @param resolveCwd - live cwd resolver for one session id.
  * @param getTimeoutMs - live per-request timeout for aigc_http_request.
  * @param getMediaLimit - live cap on bytes the http tool may write to disk.
+ * @param pipelineEngine - the PipelineEngine instance for the aigc_pipeline_* tools (per docs/product/02-pipeline.md).
  * @returns a disposer that unregisters all tools.
  */
 export function registerTools(
@@ -500,6 +508,7 @@ export function registerTools(
   resolveCwd: (sessionId: string) => string,
   getTimeoutMs: () => number,
   getMediaLimit: () => number = () => 100 * 1024 * 1024,
+  pipelineEngine: PipelineEngine,
 ): () => void {
   // Wire the media-limit getter so module-level helpers (saveRerollResponse)
   // can read the live value without it being threaded through every call.
@@ -2846,6 +2855,361 @@ export function registerTools(
         file_path: result.outputPath,
         file_size: outInfo.size,
         duration_ms: result.durationMs,
+      }
+    },
+  }))
+
+  // ══ Pipeline DAG tools (per docs/product/02-pipeline.md §3) ═══════════════
+  // The pipeline engine runs declared step graphs: topological sort, parallel
+  // independent branches, place + wire outputs on the canvas, persist state
+  // for breakpoint resume, AbortSignal-based cancel. The 5 tools below are
+  // thin wrappers around PipelineEngine methods.
+
+  // ── aigc_pipeline_run ─────────────────────────────────────────────────────
+  register(defineTool({
+    name: 'aigc_pipeline_run',
+    description:
+      'Submit a declarative pipeline spec (a list of AIGC steps wired by declared input edges) and start executing it. '
+      + 'The host topologically sorts the steps, runs independent branches in parallel, places each step\'s output on the canvas, '
+      + 'wires edges to the step\'s inputs, and notifies you of progress via agent.inject (you do NOT need to poll). '
+      + 'Use this for compound goals like "make a 30s product ad" (t2i → i2v → tts → add_audio → clip) instead of calling '
+      + 'aigc_http_request + aigc_canvas_place in sequence. '
+      + 'On step failure the pipeline pauses (onError=abort) or continues independent branches (onError=continue); call '
+      + 'aigc_pipeline_resume to retry failed steps (optionally with step_overrides to swap provider/params). '
+      + 'Call aigc_pipeline_status to query state, aigc_pipeline_cancel to abort, aigc_pipeline_list to see all pipelines. '
+      + 'Pipeline state is persisted to <cwd>/.dsh-aigc-canvas/<sessionId>/pipelines/<pipeline_id>.json so a crashed '
+      + 'session can be resumed. Each step\'s output element has producedBy="aigc_pipeline".',
+    parameters: {
+      spec: {
+        type: 'json',
+        required: true,
+        description:
+          'The PipelineSpec object: { name: string, onError: "abort"|"continue", steps: StepSpec[] }. '
+          + 'Each StepSpec: { id: string, capability?: "t2i"|"i2i"|"t2v"|"i2v"|"fl2v"|"ref2v"|"tts"|"music"|"transcribe"|"edit"|"chat", '
+          + 'operation?: "concat"|"clip"|"extract_audio"|"extract_frame"|"speed"|"resize"|"reverse"|"add_audio"|"images_to_video", '
+          + 'inputs?: Array<{ from: string (step id), relation?: "input"|"first_frame"|"last_frame"|"audio_track"|"reference"|"style"|"mask"|"variation_of"|"remix_of"|"alternative_of"|"edited_from" }>, '
+          + 'params: Record<string, unknown>, provider_id?: string, when?: string }. '
+          + 'Use {{param_name}} placeholders in strings (prompt text, etc.) and pass values via the `params` argument. '
+          + 'Example: { name: "30s ad", onError: "abort", steps: [{ id: "img", capability: "t2i", params: { prompt: "product photo of {{product}}" } }, { id: "vid", capability: "i2v", inputs: [{ from: "img", relation: "first_frame" }], params: { prompt: "pan around" } }] }',
+      },
+      params: {
+        type: 'json',
+        description:
+          'Template parameter values for {{placeholder}} substitution in the spec (e.g. { product: "iPhone 17", tagline: "未来已来" }). '
+          + 'Applied to every string in the spec (prompt text, etc.) before execution. Optional when the spec has no placeholders.',
+      },
+      async: {
+        type: 'boolean',
+        description:
+          'true (default) = return immediately with pipeline_id; progress flows via agent.inject (preferred for long pipelines). '
+          + 'false = block this tool call until the pipeline completes or fails (use for short pipelines or when you need the final state synchronously).',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          pipeline_id: { type: 'string', required: true, description: 'The pipeline id (use with aigc_pipeline_status / resume / cancel).' },
+          name: { type: 'string', required: true },
+          status: { type: 'string', required: true, enum: ['running', 'completed', 'failed', 'cancelled'] },
+          steps: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                status: { type: 'string', required: true, enum: ['pending', 'running', 'completed', 'failed', 'skipped'] },
+                element_path: { type: 'string', description: 'filePath of the produced canvas element (when status is "completed").' },
+                error: { type: 'string', description: 'Failure message (when status is "failed").' },
+                started_at: { type: 'integer' },
+                finished_at: { type: 'integer' },
+              },
+            },
+          },
+        },
+      },
+      render: textRender((v: { pipeline_id: string; name: string; status: string; steps: Array<{ id: string; status: string; element_path?: string }> }) => {
+        const completed = v.steps.filter(s => s.status === 'completed').length
+        const failed = v.steps.filter(s => s.status === 'failed').length
+        const summary = v.steps.map(s => `  ${s.status === 'completed' ? '✓' : s.status === 'failed' ? '✗' : s.status === 'running' ? '⏳' : '○'} ${s.id}${s.element_path !== undefined ? ` → ${s.element_path}` : ''}`)
+        return `Pipeline "${v.name}" (${v.pipeline_id}): ${v.status} — ${completed}/${v.steps.length} done${failed > 0 ? `, ${failed} failed` : ''}.\n${summary.join('\n')}`
+      }),
+    },
+    async execute(args: { spec: unknown; params?: unknown; async?: unknown }, exec) {
+      exec.signal.throwIfAborted()
+      const sessionId = sessionIdOf(exec)
+      if (args.spec === null || typeof args.spec !== 'object' || Array.isArray(args.spec)) {
+        throw new AigcError('bad-request', 'spec must be a PipelineSpec object')
+      }
+      const spec = args.spec as PipelineSpec
+      let templateParams: Record<string, string> | undefined
+      if (args.params !== undefined) {
+        if (args.params === null || typeof args.params !== 'object' || Array.isArray(args.params)) {
+          throw new AigcError('bad-request', 'params must be a Record<string, string>')
+        }
+        templateParams = args.params as Record<string, string>
+      }
+      const isAsync = typeof args.async === 'boolean' ? args.async : true
+      const state = await pipelineEngine.start(sessionId, spec, templateParams)
+      if (isAsync) {
+        // Fire-and-forget: run in the background. Errors are caught and
+        // recorded into state.status (the engine never throws out of run()).
+        const abort = new AbortController()
+        void pipelineEngine.run(state, abort).catch(() => {
+          // The engine records failures into state; nothing to do here.
+        })
+        return pipelineStateProjection(state)
+      }
+      // Sync mode: block until completion. The tool's own AbortSignal
+      // (tied to the agent's call timeout) is independent from the
+      // pipeline's internal AbortController; we create a fresh one and
+      // chain it to the tool signal so a tool-level cancel propagates.
+      const abort = new AbortController()
+      const onToolAbort = () => abort.abort(new Error('tool call aborted'))
+      exec.signal.addEventListener('abort', onToolAbort, { once: true })
+      try {
+        const finalState = await pipelineEngine.run(state, abort)
+        return pipelineStateProjection(finalState)
+      } finally {
+        exec.signal.removeEventListener('abort', onToolAbort)
+      }
+    },
+  }))
+
+  // ── aigc_pipeline_status ──────────────────────────────────────────────────
+  register(defineTool({
+    name: 'aigc_pipeline_status',
+    description:
+      'Query the current state of one pipeline (running / completed / failed / cancelled) and its steps. '
+      + 'Returns each step\'s status (pending/running/completed/failed/skipped), element_path (when completed), '
+      + 'and error (when failed). Use this after aigc_pipeline_run (async=true) to check progress, or after '
+      + 'aigc_pipeline_resume to verify the retry succeeded. For long-running pipelines, prefer waiting for '
+      + 'the agent.inject progress notifications instead of polling.',
+    parameters: {
+      pipeline_id: { type: 'string', required: true, description: 'The pipeline id returned by aigc_pipeline_run.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          pipeline_id: { type: 'string', required: true },
+          name: { type: 'string', required: true },
+          status: { type: 'string', required: true, enum: ['running', 'completed', 'failed', 'cancelled'] },
+          steps: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                status: { type: 'string', required: true, enum: ['pending', 'running', 'completed', 'failed', 'skipped'] },
+                element_path: { type: 'string' },
+                error: { type: 'string' },
+                started_at: { type: 'integer' },
+                finished_at: { type: 'integer' },
+              },
+            },
+          },
+        },
+      },
+      render: textRender((v: { pipeline_id: string; name: string; status: string; steps: Array<{ id: string; status: string; element_path?: string; error?: string }> }) => {
+        const completed = v.steps.filter(s => s.status === 'completed').length
+        const lines = v.steps.map(s => `  ${s.status === 'completed' ? '✓' : s.status === 'failed' ? '✗' : s.status === 'running' ? '⏳' : '○'} ${s.id}${s.element_path !== undefined ? ` → ${s.element_path}` : ''}${s.error !== undefined ? ` (error: ${s.error})` : ''}`)
+        return `Pipeline "${v.name}" (${v.pipeline_id}): ${v.status} — ${completed}/${v.steps.length} done.\n${lines.join('\n')}`
+      }),
+    },
+    async execute(args: { pipeline_id: string }, exec) {
+      exec.signal.throwIfAborted()
+      const sessionId = sessionIdOf(exec)
+      const state = await pipelineEngine.status(sessionId, args.pipeline_id)
+      return pipelineStateProjection(state)
+    },
+  }))
+
+  // ── aigc_pipeline_resume ──────────────────────────────────────────────────
+  register(defineTool({
+    name: 'aigc_pipeline_resume',
+    description:
+      'Resume a paused/failed pipeline from its breakpoint. Skips steps that already completed (their element_path is reused by '
+      + 'downstream steps), retries failed/skipped steps, and continues any pending downstream steps. '
+      + 'Optionally pass step_overrides to modify specific steps before retrying — e.g. swap a failed step\'s provider_id, '
+      + 'or merge in new params. '
+      + 'Pipeline state is loaded from <cwd>/.dsh-aigc-canvas/<sessionId>/pipelines/<pipeline_id>.json so resume survives a host restart. '
+      + 'Typical flow: pipeline fails at step 3 (provider 429) → ask user how to retry → call aigc_pipeline_resume with '
+      + '{ pipeline_id, step_overrides: { step_3: { provider_id: "openai" } } } → host skips steps 1-2, retries step 3 with the new provider, '
+      + 'continues steps 4-5. Sync (blocks until the retry completes).',
+    parameters: {
+      pipeline_id: { type: 'string', required: true, description: 'The pipeline id to resume.' },
+      step_overrides: {
+        type: 'json',
+        description:
+          'Optional map of step_id → { provider_id?, params? } applied to the spec before retrying. '
+          + 'provider_id replaces the step\'s declared provider; params are MERGED into the step\'s params (overrides matching keys). '
+          + 'Example: { narration: { provider_id: "openai" }, with_audio: { params: { volume: 0.8 } } }.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          pipeline_id: { type: 'string', required: true },
+          name: { type: 'string', required: true },
+          status: { type: 'string', required: true, enum: ['running', 'completed', 'failed', 'cancelled'] },
+          steps: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                status: { type: 'string', required: true, enum: ['pending', 'running', 'completed', 'failed', 'skipped'] },
+                element_path: { type: 'string' },
+                error: { type: 'string' },
+                started_at: { type: 'integer' },
+                finished_at: { type: 'integer' },
+              },
+            },
+          },
+        },
+      },
+      render: textRender((v: { pipeline_id: string; name: string; status: string; steps: Array<{ id: string; status: string }> }) => {
+        const completed = v.steps.filter(s => s.status === 'completed').length
+        return `Pipeline "${v.name}" resumed (${v.pipeline_id}): ${v.status} — ${completed}/${v.steps.length} done.`
+      }),
+    },
+    async execute(args: { pipeline_id: string; step_overrides?: unknown }, exec) {
+      exec.signal.throwIfAborted()
+      const sessionId = sessionIdOf(exec)
+      let overrides: StepOverrides | undefined
+      if (args.step_overrides !== undefined) {
+        if (args.step_overrides === null || typeof args.step_overrides !== 'object' || Array.isArray(args.step_overrides)) {
+          throw new AigcError('bad-request', 'step_overrides must be a Record<string, { provider_id?, params? }>')
+        }
+        const raw = args.step_overrides as Record<string, unknown>
+        overrides = {}
+        for (const [stepId, value] of Object.entries(raw)) {
+          if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+            throw new AigcError('bad-request', `step_overrides["${stepId}"] must be an object { provider_id?, params? }`)
+          }
+          const rec = value as { provider_id?: unknown; params?: unknown }
+          const ov: StepOverride = {}
+          if (rec.provider_id !== undefined) {
+            if (typeof rec.provider_id !== 'string') throw new AigcError('bad-request', `step_overrides["${stepId}"].provider_id must be a string`)
+            ov.provider_id = rec.provider_id
+          }
+          if (rec.params !== undefined) {
+            if (rec.params === null || typeof rec.params !== 'object' || Array.isArray(rec.params)) {
+              throw new AigcError('bad-request', `step_overrides["${stepId}"].params must be an object`)
+            }
+            ov.params = rec.params as Record<string, unknown>
+          }
+          overrides[stepId] = ov
+        }
+      }
+      // Sync: block until the retry completes (resume re-runs the engine).
+      const state = await pipelineEngine.resume(sessionId, args.pipeline_id, overrides)
+      return pipelineStateProjection(state)
+    },
+  }))
+
+  // ── aigc_pipeline_cancel ──────────────────────────────────────────────────
+  register(defineTool({
+    name: 'aigc_pipeline_cancel',
+    description:
+      'Cancel a running pipeline. Aborts in-flight steps via AbortSignal; remaining pending/running steps are marked "skipped". '
+      + 'Already-completed steps keep their canvas elements (keep_artifacts controls future behavior — currently artifacts are always kept; '
+      + 'the canvas owns element lifecycle, use aigc_canvas_place + aigc_canvas_unlink or canvas.delete API to remove them explicitly). '
+      + 'Returns the count of completed steps at cancel time. Idempotent: cancelling an already-finished pipeline returns cancelled=false '
+      + 'with the persisted completed count.',
+    parameters: {
+      pipeline_id: { type: 'string', required: true, description: 'The pipeline id to cancel.' },
+      keep_artifacts: {
+        type: 'boolean',
+        description: 'Whether to keep already-generated canvas elements (default true). Currently always true — artifacts are owned by the canvas service and not auto-deleted.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          cancelled: { type: 'boolean', required: true, description: 'true if a running pipeline was actively aborted; false if it was already finished.' },
+          completed_steps: { type: 'integer', required: true, description: 'How many steps had completed when the cancel took effect.' },
+        },
+      },
+      render: textRender((v: { cancelled: boolean; completed_steps: number }) =>
+        v.cancelled
+          ? `Pipeline cancelled. ${v.completed_steps} step(s) had completed; their canvas elements are preserved.`
+          : `Pipeline was not running (already finished). ${v.completed_steps} step(s) completed.`,
+      ),
+    },
+    async execute(args: { pipeline_id: string; keep_artifacts?: unknown }, exec) {
+      exec.signal.throwIfAborted()
+      const sessionId = sessionIdOf(exec)
+      const keepArtifacts = typeof args.keep_artifacts === 'boolean' ? args.keep_artifacts : true
+      return pipelineEngine.cancel(sessionId, args.pipeline_id, keepArtifacts)
+    },
+  }))
+
+  // ── aigc_pipeline_list ────────────────────────────────────────────────────
+  register(defineTool({
+    name: 'aigc_pipeline_list',
+    description:
+      'List all pipelines for the calling session (running + completed + failed + cancelled). Returns a compact summary per pipeline '
+      + '(id, name, status, started_at, finished_at, step_count, completed_count). Use this to discover pipelines from a prior session '
+      + 'or to find a pipeline_id you forgot. For full step detail, call aigc_pipeline_status with one pipeline_id.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          pipelines: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                pipeline_id: { type: 'string', required: true },
+                name: { type: 'string', required: true },
+                status: { type: 'string', required: true, enum: ['running', 'completed', 'failed', 'cancelled'] },
+                started_at: { type: 'integer', required: true },
+                finished_at: { type: 'integer' },
+                step_count: { type: 'integer', required: true },
+                completed_count: { type: 'integer', required: true },
+              },
+            },
+          },
+        },
+      },
+      render: textRender((v: { pipelines: Array<{ pipeline_id: string; name: string; status: string; step_count: number; completed_count: number }> }) => {
+        if (v.pipelines.length === 0) return 'No pipelines for this session yet.'
+        const lines = v.pipelines.map(p => `  ${p.pipeline_id}  "${p.name}"  ${p.status}  ${p.completed_count}/${p.step_count} steps`)
+        return `Pipelines (${v.pipelines.length}):\n${lines.join('\n')}`
+      }),
+    },
+    async execute(_args: unknown, exec) {
+      exec.signal.throwIfAborted()
+      const sessionId = sessionIdOf(exec)
+      const summaries = await pipelineEngine.list(sessionId)
+      return {
+        pipelines: summaries.map(s => ({
+          pipeline_id: s.pipeline_id,
+          name: s.name,
+          status: s.status,
+          started_at: s.started_at,
+          ...(s.finished_at !== undefined ? { finished_at: s.finished_at } : {}),
+          step_count: s.step_count,
+          completed_count: s.completed_count,
+        })),
       }
     },
   }))

@@ -34,13 +34,16 @@ import { ProviderStore } from './provider-store.js'
 import {
   canvasDirFor,
   createAigcCanvasService,
+  coerceElementStatus,
   mimeTypeFor,
   type AigcCanvasService,
   type AigcElement,
+  type ElementStatus,
 } from './canvas-registry.js'
 import type { AigcAgent, AigcUserMessage } from './context-types.js'
 import { isTrustedApiRequest } from './trust-fence.js'
 import { registerTools, type ProviderInfo } from './tools.js'
+import { PipelineEngine, type ProgressEvent } from './pipeline.js'
 import { AigcError, readJsonBody, requireString, writeError, writeJson, writeOk } from './wire.js'
 import { getLogEntries, clearLogEntries, type RequestLogEntry } from './request-log.js'
 import { getSessionCost, clearSessionCost, type SessionCost } from './cost-tracker.js'
@@ -115,16 +118,17 @@ function toGlobalSettings(resolved: ResolvedAigcConfig): RuntimeGlobalSettings {
 /**
  * Build a minimal user-role message and inject it into the agent's
  * next-step context (non-waking). Used to notify the model of user-
- * initiated canvas actions (deletions, drag-dropped files).
+ * initiated canvas actions (deletions, drag-dropped files) and pipeline
+ * progress events.
  */
-function notifyAgent(ctx: Context, sessionId: string, text: string, summary: string): void {
+function notifyAgent(ctx: Context, sessionId: string, text: string, summary: string, form: 'notice' | 'progress' = 'notice'): void {
   const agent = ctx.agents.get(sessionId) as AigcAgent | undefined
   if (agent === undefined) return
   const message: AigcUserMessage = {
     id: randomUUID(),
     role: 'user',
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: 'dsh-aigc-canvas', form: 'notice', summary: summary.slice(0, 120) },
+    source: { kind: 'plugin', plugin: 'dsh-aigc-canvas', form, summary: summary.slice(0, 120) },
   }
   agent.inject(message)
 }
@@ -220,6 +224,39 @@ function buildApi(
         `User dragged a file onto the canvas: "${fileName}" (${kind}, ${bytes.byteLength} bytes). It is now placed as element "${el.title}" at (${el.x}, ${el.y}) with filePath ${el.filePath}. You can reference it in future generation calls.`,
         `user uploaded ${kind} "${el.title}"`,
       )
+      return { ok: true, element: el }
+    },
+    'canvas.notify': (payload) => {
+      // Client-side bridge for agent.inject: lets the canvas UI send a
+      // user-role notice to the agent (e.g. "请用 aigc_reroll 重新生成
+      // 元素 /path/to/element.png"). Non-waking; the agent picks it up
+      // on its next step. Per docs/product/04-ux-reliability.md §1.
+      const sessionId = requireString(payload, 'sessionId')
+      const record = payload as Record<string, unknown> | null
+      const message = typeof record?.message === 'string' ? record.message : ''
+      if (message === '') {
+        throw new AigcError('bad-request', 'message is a required non-empty string')
+      }
+      const summary = typeof record?.summary === 'string' ? record.summary : message.slice(0, 120)
+      notifyAgent(ctx, sessionId, message, summary)
+      return { ok: true }
+    },
+    'canvas.set_status': async (payload) => {
+      // Update an element's lifecycle status (draft/ready/rejected/archived)
+      // and optional winner flag. Per docs/product/01-agent-autonomy.md §5
+      // + docs/product/04-ux-reliability.md §1 (right-click menu).
+      const sessionId = requireString(payload, 'sessionId')
+      const uuid = requireString(payload, 'uuid')
+      const record = payload as Record<string, unknown> | null
+      const status = coerceElementStatus(record?.status) as ElementStatus
+      let winner: boolean | undefined
+      if (record?.winner !== undefined) {
+        if (typeof record.winner !== 'boolean') {
+          throw new AigcError('bad-request', 'winner must be a boolean when provided')
+        }
+        winner = record.winner
+      }
+      const el = await canvas.setStatus(sessionId, uuid, status, winner)
       return { ok: true, element: el }
     },
     'providers.list': () => {
@@ -482,6 +519,23 @@ export function apply(ctx: Context, config?: AigcCanvasConfig): void {
     },
   }), 'dsh-aigc-canvas: canvas push WebSocket')
 
+  // ── Pipeline engine (per docs/product/02-pipeline.md) ───────────────────
+  // Constructed once with all live dependencies; the aigc_pipeline_* tools
+  // (registered below) call its methods directly. Progress events are
+  // forwarded to the agent via agent.inject so the model sees
+  // "[2/5] Done: animated → /path/to/video.mp4" without polling.
+  const pipelineEngine = new PipelineEngine({
+    canvas,
+    getProvider,
+    resolveCwd: (sessionId) => sessionCwdOf(ctx, sessionId),
+    getTimeoutMs: () => resolved.requestTimeoutMs,
+    getMediaLimit: () => resolved.mediaSizeLimit,
+    onProgress: (event: ProgressEvent) => {
+      // Per doc §5: inject a short summary into the agent's next-step context.
+      notifyAgent(ctx, event.session_id, event.summary, event.summary, 'progress')
+    },
+  })
+
   // ── Register the model-facing tools ───────────────────────────────────
   ctx.effect(() => registerTools(
     ctx,
@@ -493,6 +547,7 @@ export function apply(ctx: Context, config?: AigcCanvasConfig): void {
     (sessionId) => sessionCwdOf(ctx, sessionId),
     () => resolved.requestTimeoutMs,
     () => resolved.mediaSizeLimit,
+    pipelineEngine,
   ))
 
   ctx.effect(() => () => {

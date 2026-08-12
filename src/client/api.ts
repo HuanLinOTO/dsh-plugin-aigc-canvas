@@ -151,6 +151,33 @@ export function uploadCanvasFile(sessionId: string, fileName: string, mediaBase6
   return call<{ ok: boolean; element: AigcElement }>('canvas.upload', { sessionId, fileName, mediaBase64, ...opts }, signal)
 }
 
+/**
+ * Inject a user-role notice into the agent's next-step context
+ * (non-waking). Used by the canvas UI's right-click menu and quick
+ * action toolbar to ask the agent to regenerate / edit / run a
+ * workflow. Per docs/product/04-ux-reliability.md §1 + §7.
+ *
+ * The optional `summary` is the short label shown in the agent's
+ * inbox (truncated to 120 chars by the host).
+ */
+export function notifyAgent(sessionId: string, message: string, summary?: string, signal?: AbortSignal): Promise<{ ok: boolean }> {
+  const payload: Record<string, unknown> = { sessionId, message }
+  if (summary !== undefined) payload.summary = summary
+  return call<{ ok: boolean }>('canvas.notify', payload, signal)
+}
+
+/**
+ * Update one element's lifecycle status (draft/ready/rejected/archived)
+ * and optional winner flag. Per docs/product/01-agent-autonomy.md §5
+ * + docs/product/04-ux-reliability.md §1 (right-click → mark as
+ * winner / rejected / archive).
+ */
+export function setElementStatus(sessionId: string, uuid: string, status: ElementStatus, winner?: boolean, signal?: AbortSignal): Promise<{ ok: boolean; element: AigcElement }> {
+  const payload: Record<string, unknown> = { sessionId, uuid, status }
+  if (winner !== undefined) payload.winner = winner
+  return call<{ ok: boolean; element: AigcElement }>('canvas.set_status', payload, signal)
+}
+
 /** Fetch the full runtime config (providers + global settings). */
 export function fetchConfig(signal?: AbortSignal): Promise<RuntimeConfig> {
   return call<RuntimeConfig>('config.get', {}, signal)

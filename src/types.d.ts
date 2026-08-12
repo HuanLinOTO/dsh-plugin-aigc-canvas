@@ -181,7 +181,7 @@ declare module 'cordis' {
           readonly source: {
             readonly kind: 'plugin'
             readonly plugin: string
-            readonly form?: 'notice'
+            readonly form?: 'notice' | 'progress'
             readonly summary?: string
           }
         }): void

@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createAigcCanvasService, canvasDirFor, type AigcCanvasService } from '../src/canvas-registry.js'
 import { registerTools, elementProjection, edgeProjection, titleOf, type ProviderInfo } from '../src/tools.js'
+import { PipelineEngine } from '../src/pipeline.js'
 import { AigcError } from '../src/wire.js'
 import type { ResolvedAigcProvider } from '../src/config.js'
 import type { EndpointSpec } from '../src/endpoint-catalog.js'
@@ -105,23 +106,35 @@ function registerAll(
   providers: readonly ResolvedAigcProvider[],
   canvas: AigcCanvasService,
   cwd: string,
-): { dispose: () => void; instructionStore: ReturnType<typeof makeInstructionStore>; endpointStore: ReturnType<typeof makeEndpointStore> } {
+): { dispose: () => void; instructionStore: ReturnType<typeof makeInstructionStore>; endpointStore: ReturnType<typeof makeEndpointStore>; pipelineEngine: PipelineEngine } {
   // Mutable provider list mirroring the host ProviderStore: set_instructions
   // + set_endpoints write through, and getProvider / listProviders read live values.
   const mutable = providers.map(p => ({ ...p }))
   const instructionStore = makeInstructionStore(mutable)
   const endpointStore = makeEndpointStore(mutable)
   const byId = new Map(mutable.map(p => [p.id, p]))
+  const getProvider = (providerId?: string) => {
+    if (providerId === undefined || providerId === '') return mutable[0]!
+    const p = byId.get(providerId)
+    if (p === undefined) {
+      throw new AigcError('bad-request', `unknown provider_id "${providerId}"; call aigc_get_provider_info to list available providers`)
+    }
+    return p
+  }
+  // Pipeline engine — constructed with the same live deps registerTools uses.
+  // Tests that exercise the aigc_pipeline_* tools call engine methods via the
+  // registered tool execute() (which closes over the engine passed below).
+  const pipelineEngine = new PipelineEngine({
+    canvas,
+    getProvider,
+    resolveCwd: () => cwd,
+    getTimeoutMs: () => 5_000,
+    getMediaLimit: () => 100 * 1024 * 1024,
+    // No onProgress in tests — the engine emits nothing.
+  })
   const dispose = registerTools(
     ctx as unknown as Parameters<typeof registerTools>[0],
-    (providerId?: string) => {
-      if (providerId === undefined || providerId === '') return mutable[0]!
-      const p = byId.get(providerId)
-      if (p === undefined) {
-        throw new AigcError('bad-request', `unknown provider_id "${providerId}"; call aigc_get_provider_info to list available providers`)
-      }
-      return p
-    },
+    getProvider,
     (id, instructions) => {
       const result = instructionStore.set(id, instructions)
       if (result.ok) {
@@ -149,8 +162,9 @@ function registerAll(
     () => cwd,
     () => 5_000,
     () => 100 * 1024 * 1024,
+    pipelineEngine,
   )
-  return { dispose, instructionStore, endpointStore }
+  return { dispose, instructionStore, endpointStore, pipelineEngine }
 }
 
 /** A mutable endpoint catalog backing the aigc_provider_set_endpoints callback. */
@@ -242,7 +256,7 @@ describe('registerTools (stub provider)', () => {
     await rm(cwd, { recursive: true, force: true })
   })
 
-  it('registers exactly twenty tools', () => {
+  it('registers exactly twenty-five tools', () => {
     expect(Array.from(ctx.registered.keys()).sort()).toEqual([
       'aigc_assess',
       'aigc_canvas_link',
@@ -258,6 +272,11 @@ describe('registerTools (stub provider)', () => {
       'aigc_library_promote',
       'aigc_library_remove',
       'aigc_media_edit',
+      'aigc_pipeline_cancel',
+      'aigc_pipeline_list',
+      'aigc_pipeline_resume',
+      'aigc_pipeline_run',
+      'aigc_pipeline_status',
       'aigc_probe_endpoint',
       'aigc_provider_get_instructions',
       'aigc_provider_set_endpoints',
@@ -1141,8 +1160,8 @@ describe('registerTools (stub provider)', () => {
     }
   })
 
-  it('dispose unregisters all twenty tools', () => {
-    expect(ctx.registered.size).toBe(20)
+  it('dispose unregisters all twenty-five tools', () => {
+    expect(ctx.registered.size).toBe(25)
     dispose()
     expect(ctx.registered.size).toBe(0)
   })

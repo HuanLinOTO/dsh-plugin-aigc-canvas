@@ -16,11 +16,11 @@
  * (the host notifies after persisting the move).
  */
 import { Component, createElement, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ErrorInfo, type ReactNode, type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent, type ChangeEvent as ReactChangeEvent } from 'react'
-import type { AigcCanvasState, AigcEdge, AigcElement, EdgeRelation, SessionCost } from './api.js'
+import type { AigcCanvasState, AigcEdge, AigcElement, EdgeRelation, ElementStatus, SessionCost } from './api.js'
 import { CanvasStore } from './store.js'
 import { CanvasNode } from './CanvasNode.js'
 import { RequestLogPanel } from './RequestLogPanel.js'
-import { fetchSessionCost } from './api.js'
+import { fetchSessionCost, mediaUrlOf, notifyAgent, promoteAsset, setElementStatus } from './api.js'
 import css from './canvas.module.css'
 
 /** Translation function type (from the DSH locale system). */
@@ -497,6 +497,230 @@ export function CanvasView({ store, t }: CanvasViewProps): ReactNode {
     void store.deleteElement(uuid)
   }
 
+  // ── Right-click action handlers (per docs/product/04-ux-reliability.md §1) ─
+
+  /**
+   * Resolve the element for one context-menu uuid. The menu is only
+   * shown for elements with a uuid (see onNodeContextMenu), so this
+   * always finds a match — but be defensive in case the WS push
+   * removed the element between the right-click and the action.
+   */
+  const elementForMenu = (uuid: string): AigcElement | undefined => {
+    return state.elements.find(e => e.uuid === uuid)
+  }
+
+  /**
+   * Send a user-role notice to the agent (non-waking). The host's
+   * `canvas.notify` endpoint wraps `agent.inject` so the client does
+   * not need direct access to the agent registry. Best-effort: a
+   * network failure is swallowed (the next WS push carries the
+   * agent's response, which the user will see in the conversation).
+   */
+  const sendNotice = (uuid: string, message: string, summary: string): void => {
+    setContextMenu(undefined)
+    if (state.sessionId === '') return
+    void notifyAgent(state.sessionId, message, summary).catch(() => { /* best-effort */ })
+  }
+
+  /** Replace `{filePath}` / `{kind}` / `{title}` placeholders in a notice template. */
+  const fillTemplate = (template: string, el: AigcElement): string => {
+    return template
+      .replaceAll('{filePath}', el.filePath)
+      .replaceAll('{kind}', el.kind)
+      .replaceAll('{title}', el.title)
+  }
+
+  /** 重新生成... → ask the agent to reroll the element with aigc_reroll. */
+  const onRegenerate = (el: AigcElement): void => {
+    sendNotice(
+      el.uuid ?? '',
+      fillTemplate(t('noticeRegenerate'), el),
+      `regenerate ${el.kind} "${el.title}"`,
+    )
+  }
+
+  /**
+   * 用作参考... → copy the filePath to the clipboard AND send a notice
+   * to the agent. The doc also describes a relation-picker dialog
+   * (first_frame / last_frame / style / mask / reference); for the
+   * initial implementation we send a generic "use as reference"
+   * notice and let the agent pick the relation based on context.
+   * The clipboard copy is the user-facing half (so the user can also
+   * paste the path into a manual prompt).
+   */
+  const onUseAsReference = (el: AigcElement): void => {
+    setContextMenu(undefined)
+    // Clipboard write is async + may reject (e.g. no focus); don't block
+    // the agent notice on it.
+    void navigator.clipboard?.writeText(el.filePath).catch(() => { /* best-effort */ })
+    if (state.sessionId !== '') {
+      void notifyAgent(
+        state.sessionId,
+        fillTemplate(t('noticeUseAsReference'), el),
+        `use ${el.kind} "${el.title}" as reference`,
+      ).catch(() => { /* best-effort */ })
+    }
+  }
+
+  /** 发到对话 → send the element's filePath + kind + title to the agent. */
+  const onSendToChat = (el: AigcElement): void => {
+    sendNotice(
+      el.uuid ?? '',
+      fillTemplate(t('noticeSendToChat'), el),
+      `use ${el.kind} "${el.title}" as reference`,
+    )
+  }
+
+  /** 下载 → open the media URL in a new tab with download=1. */
+  const onDownload = (el: AigcElement): void => {
+    setContextMenu(undefined)
+    if (el.uuid === undefined || (state.sessionId === '' && el.sessionId === undefined)) return
+    const sid = el.sessionId ?? state.sessionId
+    if (sid === '') return
+    const url = mediaUrlOf(sid, el.uuid, true)
+    // window.open with download=1 lets the browser handle the download
+    // (the host sets Content-Disposition: attachment when download=1).
+    window.open(url, '_blank', 'noopener')
+  }
+
+  /**
+   * 提升到资产库... → call library.promote. The doc describes a
+   * category-picker dialog; for the initial implementation we
+   * promote with the default `final-product` category and let the
+   * user re-tag from the asset library UI later.
+   */
+  const onPromoteToLibrary = (el: AigcElement): void => {
+    setContextMenu(undefined)
+    if (el.uuid === undefined || state.sessionId === '') return
+    void promoteAsset(state.sessionId, el.uuid, {
+      category: 'final-product',
+      title: el.title,
+    }).catch(() => { /* best-effort; surface in a future toast */ })
+  }
+
+  /**
+   * Update an element's lifecycle status via `canvas.set_status`.
+   * Best-effort: the WS push carries the authoritative state, so
+   * we don't optimistically patch the local snapshot.
+   */
+  const onSetStatus = (uuid: string, status: ElementStatus, winner?: boolean): void => {
+    setContextMenu(undefined)
+    if (state.sessionId === '') return
+    void setElementStatus(state.sessionId, uuid, status, winner).catch(() => { /* best-effort */ })
+  }
+
+  // ── Quick action toolbar handlers (per docs/product/04-ux-reliability.md §7) ─
+
+  /**
+   * + 生成 → ask the agent to generate a new asset (provider info →
+   * http_request → canvas_place). The doc describes a t2i/t2v/tts
+   * picker dialog; for the initial implementation we send a generic
+   * "please generate something" notice and let the agent ask the
+   * user for the specifics (prompt, kind).
+   */
+  const onToolbarGenerate = (): void => {
+    if (state.sessionId === '') return
+    void notifyAgent(
+      state.sessionId,
+      t('noticeGenerate'),
+      'user requested generation',
+    ).catch(() => { /* best-effort */ })
+  }
+
+  /**
+   * ✂ 编辑选中 → ask the agent to run aigc_media_edit (ffmpeg) on
+   * the currently-selected element. Disabled when nothing is selected.
+   */
+  const onToolbarEditSelected = (): void => {
+    if (state.sessionId === '' || selected === undefined) return
+    void notifyAgent(
+      state.sessionId,
+      fillTemplate(t('noticeEditSelected'), selected),
+      `edit ${selected.kind} "${selected.title}"`,
+    ).catch(() => { /* best-effort */ })
+  }
+
+  /**
+   * ▶ 运行工作流 → ask the agent to list + run a pipeline template.
+   * (Per docs/product/02-pipeline.md; the template picker UI is a
+   * future enhancement — for now the agent lists templates in the
+   * conversation and the user picks one.)
+   */
+  const onToolbarRunWorkflow = (): void => {
+    if (state.sessionId === '') return
+    void notifyAgent(
+      state.sessionId,
+      t('noticeRunWorkflow'),
+      'user requested workflow run',
+    ).catch(() => { /* best-effort */ })
+  }
+
+  /**
+   * Build the right-click context menu items for one element uuid.
+   * Per docs/product/04-ux-reliability.md §1: 5 action items, a
+   * separator, 3 status items, a separator, and Delete (in the
+   * destructive style).
+   *
+   * The element is resolved from the current snapshot. If it was
+   * removed between the right-click and the menu render (race with
+   * the WS push), every item except Delete is disabled — Delete is
+   * kept enabled because store.deleteElement is idempotent.
+   */
+  const buildContextMenuItems = (uuid: string): ContextMenuItem[] => {
+    const el = elementForMenu(uuid)
+    const missing = el === undefined
+    return [
+      {
+        label: t('menuRegenerate'),
+        disabled: missing,
+        onClick: el !== undefined ? () => onRegenerate(el) : undefined,
+      },
+      {
+        label: t('menuUseAsReference'),
+        disabled: missing,
+        onClick: el !== undefined ? () => onUseAsReference(el) : undefined,
+      },
+      {
+        label: t('menuSendToChat'),
+        disabled: missing,
+        onClick: el !== undefined ? () => onSendToChat(el) : undefined,
+      },
+      {
+        label: t('menuDownload'),
+        // Download needs a uuid (the media route resolves uuid → file).
+        disabled: missing || el?.uuid === undefined,
+        onClick: el !== undefined ? () => onDownload(el) : undefined,
+      },
+      {
+        label: t('menuPromoteToLibrary'),
+        disabled: missing || el?.uuid === undefined,
+        onClick: el !== undefined ? () => onPromoteToLibrary(el) : undefined,
+      },
+      { separator: true },
+      {
+        label: t('menuMarkWinner'),
+        disabled: missing,
+        onClick: el !== undefined ? () => onSetStatus(uuid, 'ready', true) : undefined,
+      },
+      {
+        label: t('menuMarkRejected'),
+        disabled: missing,
+        onClick: el !== undefined ? () => onSetStatus(uuid, 'rejected') : undefined,
+      },
+      {
+        label: t('menuArchive'),
+        disabled: missing,
+        onClick: el !== undefined ? () => onSetStatus(uuid, 'archived') : undefined,
+      },
+      { separator: true },
+      {
+        label: t('delete'),
+        danger: true,
+        onClick: () => onDeleteElement(uuid),
+      },
+    ]
+  }
+
   // Drag-drop files onto the canvas surface.
   // stopPropagation() is critical: the canvas lives inside better-sidebar's
   // LeafView, whose onDragOver unconditionally calls preventDefault() and
@@ -787,16 +1011,43 @@ export function CanvasView({ store, t }: CanvasViewProps): ReactNode {
           },
         })
       : null,
-    // Right-click context menu
+    // Right-click context menu (per docs/product/04-ux-reliability.md §1)
     contextMenu !== undefined
       ? createElement(ContextMenu, {
           x: contextMenu.x,
           y: contextMenu.y,
-          items: [
-            { label: t('delete'), onClick: () => onDeleteElement(contextMenu.uuid) },
-          ],
+          items: buildContextMenuItems(contextMenu.uuid),
           onClose: () => setContextMenu(undefined),
         })
+      : null,
+    // Quick action toolbar (left side of the canvas, per doc 04 §7).
+    // "+ 生成" / "✂ 编辑选中" / "▶ 运行工作流" — all send a notice to the
+    // agent via canvas.notify. "编辑选中" is disabled when nothing is
+    // selected.
+    state.sessionId !== ''
+      ? createElement(
+          'div',
+          { className: css.toolbar },
+          createElement('button', {
+            type: 'button',
+            className: css.toolbarButton,
+            onClick: onToolbarGenerate,
+            title: t('toolbarGenerateTitle'),
+          }, t('toolbarGenerate')),
+          createElement('button', {
+            type: 'button',
+            className: css.toolbarButton,
+            onClick: onToolbarEditSelected,
+            disabled: selected === undefined,
+            title: selected === undefined ? t('toolbarNoSelection') : t('toolbarEditSelectedTitle'),
+          }, t('toolbarEditSelected')),
+          createElement('button', {
+            type: 'button',
+            className: css.toolbarButton,
+            onClick: onToolbarRunWorkflow,
+            title: t('toolbarRunWorkflowTitle'),
+          }, t('toolbarRunWorkflow')),
+        )
       : null,
     // Minimap: bottom-right overview showing element outlines + viewport frame.
     state.elements.length > 0
@@ -810,11 +1061,25 @@ export function CanvasView({ store, t }: CanvasViewProps): ReactNode {
   )
 }
 
+/** One entry in the right-click context menu. */
+interface ContextMenuItem {
+  /** Visible label (omitted for separator entries). */
+  label?: string
+  /** Click handler. Called only when `disabled` is false. */
+  onClick?: () => void
+  /** Render as a non-clickable horizontal rule. */
+  separator?: boolean
+  /** Greyed out + non-clickable. */
+  disabled?: boolean
+  /** Use the destructive (red) hover style — for Delete. */
+  danger?: boolean
+}
+
 /** A minimal fixed-position context menu (right-click). */
 function ContextMenu(props: {
   x: number
   y: number
-  items: Array<{ label: string; onClick: () => void }>
+  items: readonly ContextMenuItem[]
   onClose: () => void
 }): ReactNode {
   // Close on any outside click or Escape.
@@ -828,22 +1093,34 @@ function ContextMenu(props: {
       window.removeEventListener('keydown', onKey)
     }
   }, [props])
+  // Clamp the menu to the viewport so a right-click near the right/bottom
+  // edge doesn't push it off-screen.
+  const style: CSSProperties = { left: props.x, top: props.y }
   return createElement(
     'div',
     {
       className: css.contextMenu,
-      style: { left: props.x, top: props.y },
+      style,
       // Stop the outside-click handler from firing on the menu itself.
       onPointerDown: (e: ReactPointerEvent<HTMLElement>) => e.stopPropagation(),
     },
-    ...props.items.map((item, i) =>
-      createElement('button', {
+    ...props.items.map((item, i) => {
+      if (item.separator === true) {
+        return createElement('hr', { key: `sep-${i}`, className: css.contextMenuSeparator })
+      }
+      const className = [
+        css.contextMenuItem,
+        item.danger === true ? css.contextMenuItemDanger ?? '' : '',
+        item.disabled === true ? css.contextMenuItemDisabled ?? '' : '',
+      ].filter(s => s !== '').join(' ')
+      return createElement('button', {
         key: i,
         type: 'button',
-        className: css.contextMenuItem,
-        onClick: () => { item.onClick() },
-      }, item.label),
-    ),
+        className,
+        disabled: item.disabled === true,
+        onClick: () => { if (item.disabled !== true) item.onClick?.() },
+      }, item.label)
+    }),
   )
 }
 

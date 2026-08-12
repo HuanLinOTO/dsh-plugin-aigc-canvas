@@ -68,7 +68,14 @@ export interface AigcUserMessage {
   readonly source: {
     readonly kind: 'plugin'
     readonly plugin: string
-    readonly form?: 'notice'
+    /**
+     * `'notice'` = a one-off user/system event the model should know about
+     *   (file deleted, file drag-dropped, etc.).
+     * `'progress'` = a pipeline progress notification (per docs/product/02-pipeline.md §5)
+     *   — emitted after each pipeline step starts/completes/fails so the
+     *   agent can update the user without polling.
+     */
+    readonly form?: 'notice' | 'progress'
     readonly summary?: string
   }
 }

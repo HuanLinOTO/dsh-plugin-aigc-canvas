@@ -37,6 +37,31 @@ export type AigcKey =
   | 'deleteElement'
   | 'dropHint'
   | 'uploading'
+  // Right-click context menu items (per docs/product/04-ux-reliability.md §1)
+  | 'menuRegenerate'
+  | 'menuUseAsReference'
+  | 'menuSendToChat'
+  | 'menuDownload'
+  | 'menuPromoteToLibrary'
+  | 'menuMarkWinner'
+  | 'menuMarkRejected'
+  | 'menuArchive'
+  | 'menuSeparator'
+  // Quick action toolbar (per docs/product/04-ux-reliability.md §7)
+  | 'toolbarGenerate'
+  | 'toolbarEditSelected'
+  | 'toolbarRunWorkflow'
+  | 'toolbarGenerateTitle'
+  | 'toolbarEditSelectedTitle'
+  | 'toolbarRunWorkflowTitle'
+  | 'toolbarNoSelection'
+  // Status update notices (sent to the agent via canvas.notify)
+  | 'noticeRegenerate'
+  | 'noticeUseAsReference'
+  | 'noticeSendToChat'
+  | 'noticeGenerate'
+  | 'noticeEditSelected'
+  | 'noticeRunWorkflow'
   // Settings — page chrome
   | 'settingsNav'
   | 'settingsTitle'
@@ -129,6 +154,28 @@ export const zh: Record<AigcKey, string> = {
   deleteElement: '删除元素',
   dropHint: '拖放文件到画布',
   uploading: '上传中…',
+  menuRegenerate: '重新生成...',
+  menuUseAsReference: '用作参考...',
+  menuSendToChat: '发到对话',
+  menuDownload: '下载',
+  menuPromoteToLibrary: '提升到资产库...',
+  menuMarkWinner: '标记为 winner',
+  menuMarkRejected: '标记为否决',
+  menuArchive: '归档',
+  menuSeparator: '─────────────',
+  toolbarGenerate: '+ 生成',
+  toolbarEditSelected: '✂ 编辑选中',
+  toolbarRunWorkflow: '▶ 运行工作流',
+  toolbarGenerateTitle: '打开快速生成弹窗（t2i/t2v/tts）',
+  toolbarEditSelectedTitle: '对选中元素执行 ffmpeg 操作',
+  toolbarRunWorkflowTitle: '打开 pipeline 模板选择器',
+  toolbarNoSelection: '请先在画布上选中一个元素',
+  noticeRegenerate: '请用 aigc_reroll 重新生成元素 {filePath}',
+  noticeUseAsReference: '请把以下元素用作后续生成的参考: {filePath}',
+  noticeSendToChat: '请使用这个元素作为参考: [filePath: {filePath}, kind: {kind}, title: {title}]',
+  noticeGenerate: '请帮我生成一个新的 AIGC 素材（先调用 aigc_get_provider_info 查看可用供应商，再调用 aigc_http_request 发起生成，最后用 aigc_canvas_place 把产物放到画布上）。',
+  noticeEditSelected: '请用 aigc_media_edit（ffmpeg）对选中元素进行编辑: {filePath}（kind: {kind}, title: {title}）',
+  noticeRunWorkflow: '请列出可用的 pipeline 模板并运行其中一个（如果只有一个模板就直接运行它）。',
   settingsNav: 'AIGC 画布',
   settingsTitle: 'AIGC 供应商',
   settingsIntro: '配置一个或多个 AIGC 供应商。每个供应商可独立设置名称、API 地址、密钥、鉴权方式和调用说明。模型通过 aigc_get_provider_info 读取供应商列表,用 aigc_http_request 调用 API(自动携带 endpoint 和 apiKey),生成的文件用 aigc_canvas_place 放到画布上。',
@@ -218,6 +265,28 @@ export const en: Record<AigcKey, string> = {
   deleteElement: 'Delete element',
   dropHint: 'Drop files onto canvas',
   uploading: 'Uploading…',
+  menuRegenerate: 'Regenerate...',
+  menuUseAsReference: 'Use as reference...',
+  menuSendToChat: 'Send to chat',
+  menuDownload: 'Download',
+  menuPromoteToLibrary: 'Promote to library...',
+  menuMarkWinner: 'Mark as winner',
+  menuMarkRejected: 'Mark as rejected',
+  menuArchive: 'Archive',
+  menuSeparator: '─────────────',
+  toolbarGenerate: '+ Generate',
+  toolbarEditSelected: '✂ Edit selected',
+  toolbarRunWorkflow: '▶ Run workflow',
+  toolbarGenerateTitle: 'Open the quick-generate dialog (t2i/t2v/tts)',
+  toolbarEditSelectedTitle: 'Run an ffmpeg operation on the selected element',
+  toolbarRunWorkflowTitle: 'Open the pipeline template picker',
+  toolbarNoSelection: 'Select an element on the canvas first',
+  noticeRegenerate: 'Please regenerate the element {filePath} using aigc_reroll',
+  noticeUseAsReference: 'Please use the following element as a reference for the next generation: {filePath}',
+  noticeSendToChat: 'Please use this element as a reference: [filePath: {filePath}, kind: {kind}, title: {title}]',
+  noticeGenerate: 'Please generate a new AIGC asset (call aigc_get_provider_info to list available providers, then aigc_http_request to generate, and finally aigc_canvas_place to put the result on the canvas).',
+  noticeEditSelected: 'Please edit the selected element with aigc_media_edit (ffmpeg): {filePath} (kind: {kind}, title: {title})',
+  noticeRunWorkflow: 'Please list the available pipeline templates and run one (if there is only one, run it directly).',
   settingsNav: 'AIGC Canvas',
   settingsTitle: 'AIGC Providers',
   settingsIntro: 'Configure one or more AIGC providers. Each provider has its own name, API endpoint, key, auth scheme, and usage instructions. The agent reads the provider list via aigc_get_provider_info, calls the API via aigc_http_request (endpoint + apiKey attached automatically), and places generated files onto the canvas with aigc_canvas_place.',

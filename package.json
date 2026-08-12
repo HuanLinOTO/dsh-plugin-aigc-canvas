@@ -1,0 +1,121 @@
+{
+  "name": "@dsh-external/dsh-aigc-canvas",
+  "version": "0.1.0",
+  "description": "DSH plugin: an infinite free canvas for the better-sidebar plus provider-agnostic generation. Exposes aigc_get_provider_info / aigc_http_request (endpoint + apiKey auto-attached) / aigc_provider_set_instructions / aigc_canvas_place / aigc_canvas_link / aigc_canvas_unlink / aigc_canvas_list_elements tools; generated files are placed at arbitrary canvas positions and can be double-clicked for prompt + params.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/invariant.d.ts",
+      "import": "./lib/invariant.js"
+    },
+    "./client": {
+      "types": "./lib/client.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./client/service": {
+      "types": "./lib/types/client/service.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "lib/",
+    "assets/",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "tsdown --config tsdown.config.ts && tsc -p tsconfig.build.json",
+    "bundle:client": "tsdown --config tsdown.config.ts",
+    "watch": "tsdown --config tsdown.config.ts --watch",
+    "prepare": "tsdown --config tsdown.prepare.config.ts"
+  },
+  "dependencies": {
+    "schemastery": "^3.18.0",
+    "ws": "^8.18.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-locale": "^0.0.1",
+    "@deepseek-ai/dsh-client-runtime": "^0.0.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.0.1",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.0.1",
+    "@deepseek-ai/dsh-client-ui-conversation": "^0.0.1",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.0.1",
+    "@deepseek-ai/dsh-host-webserver": "^0.0.1",
+    "@deepseek-ai/dsh-invariants": "^0.0.1",
+    "@deepseek-ai/dsh-session": "^0.0.1",
+    "@deepseek-ai/dsh-tools": "^0.0.1",
+    "cordis": "^4.0.0-rc.7",
+    "dsh-better-sidebar": "^0.4.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-locale": { "optional": true },
+    "@deepseek-ai/dsh-client-runtime": { "optional": true },
+    "@deepseek-ai/dsh-client-ui-primitives": { "optional": true },
+    "@deepseek-ai/dsh-client-ui-settings": { "optional": true },
+    "@deepseek-ai/dsh-client-ui-conversation": { "optional": true },
+    "@deepseek-ai/dsh-client-ui-slots": { "optional": true },
+    "@deepseek-ai/dsh-host-webserver": { "optional": true },
+    "@deepseek-ai/dsh-invariants": { "optional": true },
+    "@deepseek-ai/dsh-session": { "optional": true },
+    "@deepseek-ai/dsh-tools": { "optional": true },
+    "cordis": { "optional": true },
+    "dsh-better-sidebar": { "optional": true },
+    "react": { "optional": true },
+    "react-dom": { "optional": true }
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-client-locale": "link:C:/Users/Administrator/.dsh/source/current/packages/client/locale",
+    "@deepseek-ai/dsh-client-runtime": "link:C:/Users/Administrator/.dsh/source/current/packages/client/runtime",
+    "@deepseek-ai/dsh-client-ui-primitives": "link:C:/Users/Administrator/.dsh/source/current/packages/client/ui-primitives",
+    "@deepseek-ai/dsh-client-ui-settings": "link:C:/Users/Administrator/.dsh/source/current/packages/client/ui-settings",
+    "@deepseek-ai/dsh-client-ui-conversation": "link:C:/Users/Administrator/.dsh/source/current/packages/client/ui-conversation",
+    "@deepseek-ai/dsh-client-ui-slots": "link:C:/Users/Administrator/.dsh/source/current/packages/client/ui-slots",
+    "@deepseek-ai/dsh-host-webserver": "link:C:/Users/Administrator/.dsh/source/current/packages/host/webserver",
+    "@deepseek-ai/dsh-invariants": "link:C:/Users/Administrator/.dsh/source/current/packages/support/invariants",
+    "@deepseek-ai/dsh-session": "link:C:/Users/Administrator/.dsh/source/current/packages/core/session",
+    "@deepseek-ai/dsh-tools": "link:C:/Users/Administrator/.dsh/source/current/packages/core/tools",
+    "@types/node": "^24.0.0",
+    "@types/react": "~18.3.1",
+    "@types/react-dom": "~18.3.1",
+    "@types/ws": "^8.5.10",
+    "cordis": "^4.0.0-rc.7",
+    "dsh-better-sidebar": "link:D:/Projects/deepseek-harness/DSH-better-sidebar",
+    "react": "^18.2.0",
+    "react-dom": "18.2.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": true,
+    "declarationMap": false,
+    "sourceMap": false,
+    "noEmit": false,
+    "emitDeclarationOnly": true,
+    "outDir": "lib",
+    "rootDir": "src",
+    "allowImportingTsExtensions": false,
+    "rewriteRelativeImportExtensions": false
+  },
+  "include": ["src"],
+  "exclude": ["src/client"]
+}

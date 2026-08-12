@@ -50,6 +50,7 @@ import type { ContentBlock, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-tools'
 import type { Context } from './context-types.js'
 import type { ResolvedAigcProvider } from './config.js'
+import { isStubEndpoint } from './config.js'
 import type { AigcElement, AigcCanvasService, EdgeRelation, ElementStatus } from './canvas-registry.js'
 import { canvasDirFor, EDGE_RELATIONS, DEFAULT_EDGE_RELATION, coerceEdgeRelation, ELEMENT_STATUSES, DEFAULT_ELEMENT_STATUS, coerceElementStatus } from './canvas-registry.js'
 import { executeProviderRequest, INLINE_TEXT_CAP, type ProviderBinaryKind, type ProviderHttpResult } from './provider-http.js'
@@ -63,6 +64,18 @@ import {
 import { logHttpRequest, logMediaEdit, clearLogEntries as clearSessionLog } from './request-log.js'
 import { calculateCallCost, recordCallCost } from './cost-tracker.js'
 import { withRetry, checkDedup, storeDedup, isRetryable, clearSessionDedup } from './retry-dedup.js'
+import {
+  ASSET_CATEGORIES,
+  coerceAssetCategory,
+  promoteAsset,
+  listAssets,
+  getAsset,
+  removeAsset,
+  resolveAssetPath,
+  type Asset,
+  type AssetCategory,
+  type AssetType,
+} from './asset-library.js'
 import type { Capability, EndpointSpec, ResponseKind } from './endpoint-catalog.js'
 import {
   CAPABILITIES,
@@ -354,6 +367,100 @@ function mimeFromExt(filePath: string): string {
   if (ext === 'mp3') return 'audio/mpeg'
   if (ext === 'wav') return 'audio/wav'
   return 'application/octet-stream'
+}
+
+/** Assessment dimensions used by `aigc_assess` when the caller omits `dimensions`. */
+const DEFAULT_ASSESS_DIMENSIONS = ['prompt_match', 'quality', 'sfw'] as const
+
+/** Allowed `recommendation` values returned by `aigc_assess`. */
+const ASSESS_RECOMMENDATIONS = ['accept', 'reroll', 'reroll_with_adjustments'] as const
+type AssessRecommendation = typeof ASSESS_RECOMMENDATIONS[number]
+
+/** Clamp a number into [lo, hi]. */
+function clamp(n: number, lo: number, hi: number): number {
+  if (!Number.isFinite(n)) return lo
+  return Math.max(lo, Math.min(hi, n))
+}
+
+/**
+ * Extract the assistant message content from an OpenAI-shaped chat completion
+ * response body: `{ choices: [{ message: { content } }] }`. Returns '' when
+ * the shape doesn't match (so the caller can surface a clear error rather
+ * than silently parsing an empty string).
+ */
+function extractChatContent(responseText: string): string {
+  let parsed: unknown
+  try { parsed = JSON.parse(responseText) } catch { return '' }
+  if (typeof parsed !== 'object' || parsed === null) return ''
+  const choices = (parsed as { choices?: unknown }).choices
+  if (!Array.isArray(choices) || choices.length === 0) return ''
+  const first = choices[0]
+  if (typeof first !== 'object' || first === null) return ''
+  const message = (first as { message?: unknown }).message
+  if (typeof message !== 'object' || message === null) return ''
+  const content = (message as { content?: unknown }).content
+  if (typeof content === 'string') return content
+  // Some providers return content as an array of content parts
+  // (e.g. [{ type: 'text', text: '...' }]); join the text parts.
+  if (Array.isArray(content)) {
+    return content
+      .filter((p): p is { type: string; text: string } =>
+        typeof p === 'object' && p !== null && (p as { type?: string }).type === 'text' && typeof (p as { text?: unknown }).text === 'string')
+      .map(p => p.text)
+      .join('')
+  }
+  return ''
+}
+
+/**
+ * Parse the judge's free-form response content as an assessment JSON object.
+ * Handles three shapes:
+ *  1. The content IS the JSON object (best case — judge followed instructions).
+ *  2. The JSON is wrapped in a markdown fenced code block (```json ... ```).
+ *  3. The JSON is embedded somewhere in the text (first {...} block found).
+ * Returns null when no JSON object can be recovered.
+ */
+function parseAssessmentJson(content: string): Record<string, unknown> | null {
+  const trimmed = content.trim()
+  if (trimmed === '') return null
+  // 1. Direct parse.
+  const direct = tryJson(trimmed)
+  if (direct !== null && typeof direct === 'object' && !Array.isArray(direct)) {
+    return direct as Record<string, unknown>
+  }
+  // 2. Markdown fenced code block.
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  if (fenceMatch !== null) {
+    const inner = fenceMatch[1]!.trim()
+    const fenced = tryJson(inner)
+    if (fenced !== null && typeof fenced === 'object' && !Array.isArray(fenced)) {
+      return fenced as Record<string, unknown>
+    }
+  }
+  // 3. First {...} block in the text.
+  const start = trimmed.indexOf('{')
+  const end = trimmed.lastIndexOf('}')
+  if (start !== -1 && end !== -1 && end > start) {
+    const slice = trimmed.slice(start, end + 1)
+    const embedded = tryJson(slice)
+    if (embedded !== null && typeof embedded === 'object' && !Array.isArray(embedded)) {
+      return embedded as Record<string, unknown>
+    }
+  }
+  return null
+}
+
+/** JSON.parse wrapper that returns null on failure instead of throwing. */
+function tryJson(text: string): unknown {
+  try { return JSON.parse(text) } catch { return null }
+}
+
+/** Coerce an unknown value into a valid `recommendation` enum value (default 'accept'). */
+function parseRecommendation(v: unknown): AssessRecommendation {
+  if (typeof v === 'string' && (ASSESS_RECOMMENDATIONS as readonly string[]).includes(v)) {
+    return v as AssessRecommendation
+  }
+  return 'accept'
 }
 
 /**
@@ -1488,6 +1595,727 @@ export function registerTools(
     },
   }))
 
+  // ══ aigc_variation ═══════════════════════════════════════════════════════
+  register(defineTool({
+    name: 'aigc_variation',
+    description:
+      'Generate N variants in ONE step by calling the provider N times in parallel (limited concurrency), placing all '
+      + 'variants on the canvas in a grid/row/column layout, and auto-wiring edges: every variant → source with '
+      + '"variation_of", and every variant → every other variant with "alternative_of". Returns a cluster_id grouping '
+      + 'the variants. '
+      + 'This is the batch primitive for "give me 4 variations of this image" / "generate 4 cats with different seeds" — '
+      + 'no need to call aigc_reroll N times manually. '
+      + 'When source_element is omitted, the variants are generated from scratch (pure t2i) using the given prompt + '
+      + 'provider_id (default path: POST /v1/images/generations). When source_element is given, its meta.originalRequest '
+      + 'is reused as the base request (preserving size/model/etc.), and the prompt is taken from args.prompt or the '
+      + 'source\'s original prompt. '
+      + 'strategy controls how variants differ: "seed" = randomize seed per variant; "prompt_perturb" = append '
+      + 'prompt_perturb text to the prompt; "both" = both. '
+      + 'Each variant\'s meta.originalRequest is set (same as aigc_reroll) so the variant can itself be re-rerolled or '
+      + 're-varied later.',
+    parameters: {
+      source_element: {
+        type: 'string',
+        description: 'filePath of the source canvas element to base variants on (must have meta.originalRequest — place '
+          + 'it via aigc_canvas_place first if it came from aigc_http_request). When omitted, prompt + provider_id are '
+          + 'used to generate from scratch (pure t2i).',
+      },
+      prompt: {
+        type: 'string',
+        description: 'Prompt for the variants. When omitted, the source element\'s original prompt is used (requires '
+          + 'source_element). When strategy is "prompt_perturb" or "both", prompt_perturb is appended to this prompt.',
+      },
+      count: {
+        type: 'integer',
+        required: true,
+        description: 'How many variants to generate (clamped to [2, 8]).',
+      },
+      strategy: {
+        type: 'string',
+        required: true,
+        enum: ['seed', 'prompt_perturb', 'both'],
+        description: 'How to vary the variants: "seed" = randomize seed per variant; "prompt_perturb" = append '
+          + 'prompt_perturb text to the prompt; "both" = both.',
+      },
+      prompt_perturb: {
+        type: 'string',
+        description: 'Text appended to the prompt for every variant (required when strategy is "prompt_perturb" or "both").',
+      },
+      layout: {
+        type: 'string',
+        enum: ['grid', 'row', 'column'],
+        description: 'How to arrange the variants on the canvas. "grid" (default) = 2-column grid to the right of the '
+          + 'source; "row" = single horizontal row; "column" = single vertical column.',
+      },
+      provider_id: providerIdParam,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          cluster_id: { type: 'string', required: true, description: 'Opaque id grouping the variants in this cluster.' },
+          elements: {
+            type: 'array',
+            required: true,
+            description: 'The newly generated variant elements.',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                filePath: { type: 'string', required: true },
+                kind: { type: 'string', required: true, enum: ['prompt', 'image', 'video', 'audio'] },
+                title: { type: 'string', required: true },
+                x: { type: 'number', required: true },
+                y: { type: 'number', required: true },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => {
+        const v = value as { cluster_id: string; elements: Array<{ filePath: string; kind: string }> }
+        const list = v.elements.map(e => `  ${e.filePath} [${e.kind}]`).join('\n')
+        return [{
+          type: 'text',
+          text: `Generated ${v.elements.length} variant(s) in cluster ${v.cluster_id}:\n${list}`,
+        }]
+      },
+    },
+    async execute(args: {
+      source_element?: string
+      prompt?: string
+      count: number
+      strategy: string
+      prompt_perturb?: string
+      layout?: string
+      provider_id?: string
+    }, exec) {
+      exec.signal.throwIfAborted()
+      const sessionId = sessionIdOf(exec)
+      const cwd = resolveCwd(sessionId)
+      // 1. Validate + coerce count, strategy, layout.
+      if (typeof args.count !== 'number' || !Number.isFinite(args.count)) {
+        throw new AigcError('bad-request', 'count must be a finite integer (2-8)')
+      }
+      const count = Math.max(2, Math.min(8, Math.floor(args.count)))
+      if (args.strategy !== 'seed' && args.strategy !== 'prompt_perturb' && args.strategy !== 'both') {
+        throw new AigcError('bad-request', `strategy must be one of: seed, prompt_perturb, both (got: ${String(args.strategy)})`)
+      }
+      const strategy: 'seed' | 'prompt_perturb' | 'both' = args.strategy
+      const needsPerturb = strategy === 'prompt_perturb' || strategy === 'both'
+      if (needsPerturb && (typeof args.prompt_perturb !== 'string' || args.prompt_perturb === '')) {
+        throw new AigcError('bad-request', `prompt_perturb is required when strategy is "${strategy}"`)
+      }
+      const layout: 'grid' | 'row' | 'column' = (args.layout === 'row' || args.layout === 'column') ? args.layout : 'grid'
+      // 2. Resolve the source element + its originalRequest (when given).
+      await canvas.ensureHydrated(sessionId)
+      let sourceEl: AigcElement | undefined
+      let originalRequest: RequestSnapshot | undefined
+      if (args.source_element !== undefined) {
+        sourceEl = canvas.getElementByPath(sessionId, args.source_element)
+        originalRequest = sourceEl.meta?.originalRequest as RequestSnapshot | undefined
+        if (originalRequest === undefined) {
+          throw new AigcError(
+            'bad-request',
+            `cannot vary element "${args.source_element}" — it has no meta.originalRequest. `
+            + 'This happens when the element was not placed via aigc_canvas_place from a file produced by aigc_http_request. '
+            + 'Re-generate it via aigc_http_request + aigc_canvas_place first to enable variation.',
+          )
+        }
+      }
+      // 3. Resolve the prompt: explicit args.prompt > source's original prompt body.
+      const sourceBody = originalRequest?.body
+      let promptText: string | undefined
+      if (typeof args.prompt === 'string' && args.prompt !== '') {
+        promptText = args.prompt
+      } else if (isPlainObject(sourceBody)) {
+        const field = findPromptField(sourceBody)
+        if (field !== undefined && typeof sourceBody[field] === 'string') {
+          promptText = sourceBody[field] as string
+        }
+      }
+      if (promptText === undefined) {
+        throw new AigcError('bad-request', 'prompt is required when source_element is omitted or has no prompt field in its originalRequest.body')
+      }
+      // 4. Compute the final prompt (base + perturb when strategy requires it).
+      const perturbSuffix = needsPerturb && typeof args.prompt_perturb === 'string' ? ` ${args.prompt_perturb}` : ''
+      const finalPrompt = promptText + perturbSuffix
+      // 5. Resolve provider: explicit > source's provider > default.
+      const provider = getProvider(args.provider_id ?? originalRequest?.providerId)
+      // 6. Resolve the request shape (method/path/headers/query).
+      const method = originalRequest?.method ?? 'POST'
+      const path = originalRequest?.path ?? '/v1/images/generations'
+      const headers = originalRequest?.headers
+      const query = originalRequest?.query
+      // 7. Compute positions for the variants.
+      const srcX = sourceEl?.x ?? 32
+      const srcY = sourceEl?.y ?? 32
+      const positions = variationPositions(srcX, srcY, count, layout, sourceEl !== undefined)
+      // 8. Build the per-variant body. Starts from the source body (when present)
+      //    to preserve non-prompt fields (size, model, etc.). Sets the prompt
+      //    field (prompt/text/input, defaulting to 'prompt') and randomizes the
+      //    seed per variant when strategy includes seed variation.
+      const buildVariantBody = (i: number): Record<string, unknown> => {
+        const body: Record<string, unknown> = isPlainObject(sourceBody)
+          ? { ...sourceBody }
+          : {}
+        const promptField = findPromptField(body) ?? 'prompt'
+        body[promptField] = finalPrompt
+        if (strategy === 'seed' || strategy === 'both') {
+          body.seed = Math.floor(Math.random() * 1_000_000_000) + i
+        }
+        return body
+      }
+      // 9. Template snapshot for saveRerollResponse: provides method/path/query/headers.
+      //    responseInfo is overwritten by saveRerollResponse with the actual result.
+      const snapshotTemplate: RequestSnapshot = originalRequest ?? {
+        providerId: provider.id,
+        method,
+        path,
+        ...(query !== undefined ? { query } : {}),
+        ...(headers !== undefined ? { headers } : {}),
+        responseInfo: { status: 0, contentType: '', kind: '', durationMs: 0 },
+      }
+      // 10. Execute N requests in parallel with limited concurrency (max 4).
+      //     Provider rate-limits are a real concern — N simultaneous calls can trip them.
+      const CONCURRENCY_LIMIT = 4
+      const variants: AigcElement[] = new Array(count)
+      let nextIndex = 0
+      const worker = async (): Promise<void> => {
+        while (true) {
+          exec.signal.throwIfAborted()
+          const i = nextIndex++
+          if (i >= count) return
+          const variantBody = buildVariantBody(i)
+          const bodyString = JSON.stringify(variantBody)
+          const requestStartedAt = Date.now()
+          const result = await executeProviderRequest(provider, {
+            method,
+            path,
+            headers,
+            query,
+            body: bodyString,
+          }, { timeoutMs: getTimeoutMs(), signal: exec.signal })
+          const durationMs = Date.now() - requestStartedAt
+          if (!result.ok) {
+            throw new AigcError(
+              'backend-error',
+              `variation failed: provider returned HTTP ${result.status} (${result.contentType}): ${result.text.slice(0, 500)}`,
+              result.status >= 400 && result.status < 500 ? 400 : 502,
+            )
+          }
+          // Save the response + build the snapshot (delegates to saveRerollResponse
+          // for uniform binary / OpenAI b64_json extraction).
+          const saved = await saveRerollResponse(result, sessionId, cwd, provider.id, snapshotTemplate, variantBody, durationMs)
+          // Store the saved result for sequential placement below (parallel
+          // placeFile calls race on canvas.json atomic rename on Windows).
+          savedResults[i] = { saved, index: i }
+        }
+      }
+      const savedResults: Array<{ saved: { filePath: string; kind: AigcElement['kind']; snapshot: RequestSnapshot }; index: number }> = []
+      const workers: Promise<void>[] = []
+      for (let i = 0; i < Math.min(CONCURRENCY_LIMIT, count); i++) {
+        workers.push(worker())
+      }
+      await Promise.all(workers)
+      // Place all variants SEQUENTIALLY to avoid canvas.json write races.
+      const titleBase = sourceEl !== undefined ? sourceEl.title : titleOf(finalPrompt)
+      const description = (sourceEl?.description ?? titleOf(finalPrompt)).slice(0, 40)
+      for (const { saved, index: i } of savedResults) {
+        const placed = await canvas.placeFile(sessionId, {
+          kind: saved.kind,
+          filePath: saved.filePath,
+          title: `${titleBase} (variant ${i + 1})`,
+          producedBy: 'aigc_variation',
+          x: positions[i]!.x,
+          y: positions[i]!.y,
+          description,
+          promptText: finalPrompt,
+          meta: { originalRequest: saved.snapshot },
+        }, cwd)
+        variants[i] = placed
+      }
+      // 11. Wire edges: source → each variant with variation_of (when source exists).
+      if (sourceEl !== undefined) {
+        for (const v of variants) {
+          await canvas.wireEdges(
+            sessionId,
+            [{ uuid: sourceEl.uuid, relation: 'variation_of' }],
+            v.uuid,
+          )
+        }
+      }
+      // 12. Wire edges: variant_i → variant_j with alternative_of (complete graph).
+      if (variants.length > 1) {
+        for (let i = 0; i < variants.length; i++) {
+          for (let j = 0; j < variants.length; j++) {
+            if (i === j) continue
+            await canvas.wireEdges(
+              sessionId,
+              [{ uuid: variants[i]!.uuid, relation: 'alternative_of' }],
+              variants[j]!.uuid,
+            )
+          }
+        }
+      }
+      // 13. Generate cluster_id + return.
+      const cluster_id = randomUUID()
+      return {
+        cluster_id,
+        elements: variants.map(e => ({
+          filePath: e.filePath,
+          kind: e.kind,
+          title: e.title,
+          x: e.x,
+          y: e.y,
+        })),
+      }
+    },
+  }))
+
+  // ══ aigc_assess ════════════════════════════════════════════════════════
+  register(defineTool({
+    name: 'aigc_assess',
+    description:
+      'Assess one canvas element (image / video / audio) by sending it to a "judge" provider — a regular provider '
+      + 'configured with a vision-capable chat model (e.g. OpenAI gpt-4o) — and parsing the returned structured scores. '
+      + 'Returns scores per requested dimension (default: prompt_match, quality, sfw), an overall score, a short reason, '
+      + 'and a recommendation: "accept" | "reroll" | "reroll_with_adjustments". '
+      + 'When the judge provider is the built-in stub (endpoint "stub://aigc-backend"), returns synthetic scores and '
+      + 'makes NO real API call — useful for dry runs. '
+      + 'The judge provider is just a regular provider configured by the user (e.g. an OpenAI provider pointing at '
+      + 'gpt-4o); pass its id as judge_provider. The tool uses the same HTTP executor as aigc_http_request, so the '
+      + 'endpoint + apiKey are attached automatically. '
+      + 'Per docs/product/01-agent-autonomy.md §6 (agent self-critique).',
+    parameters: {
+      element: {
+        type: 'string',
+        required: true,
+        description: 'filePath of the canvas element to assess (must be an image, video, or audio element placed via '
+          + 'aigc_canvas_place). The file is read from disk and sent to the judge as a base64 data URI in a chat '
+          + 'completions request body.',
+      },
+      dimensions: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Assessment dimensions to ask the judge to score (each 0-100). Defaults to '
+          + '["prompt_match","quality","sfw"]. prompt_match = how well the result matches the original prompt; '
+          + 'quality = technical + aesthetic quality; sfw = safety (100 = completely safe). '
+          + 'Custom dimension names are allowed — the returned `scores` object is keyed by whatever dimensions you request.',
+      },
+      judge_provider: providerIdParam,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          scores: {
+            type: 'object',
+            required: true,
+            additionalProperties: true,
+            description: 'Scores per dimension (0-100). Keys match the requested `dimensions` (default: prompt_match, quality, sfw).',
+            properties: {
+              prompt_match: { type: 'number', description: 'How well the result matches the original prompt (0-100).' },
+              quality: { type: 'number', description: 'Technical + aesthetic quality (0-100).' },
+              sfw: { type: 'number', description: 'Safety score (0-100; 100 = completely safe).' },
+            },
+          },
+          overall: { type: 'number', required: true, description: 'Overall score (0-100) — the average of the dimension scores.' },
+          reason: { type: 'string', required: true, description: 'Short one-sentence explanation from the judge.' },
+          recommendation: {
+            type: 'string',
+            required: true,
+            enum: ASSESS_RECOMMENDATIONS as readonly string[],
+            description: 'accept = good enough to keep; reroll = regenerate from scratch; reroll_with_adjustments = regenerate with the suggested adjustments.',
+          },
+          adjustments: {
+            type: 'json',
+            description: 'Suggested adjustments when recommendation is "reroll_with_adjustments" (e.g. { prompt_delta: "more cinematic" }). Undefined for accept/reroll.',
+          },
+        },
+      },
+      render: (_args, value) => {
+        const v = value as { scores: Record<string, number>; overall: number; reason: string; recommendation: string }
+        const scoreLines = Object.entries(v.scores).map(([k, s]) => `  ${k}: ${s}`).join('\n')
+        return [{
+          type: 'text',
+          text: `Assessment: ${v.recommendation} (overall ${v.overall})\n${scoreLines}\n${v.reason}`,
+        }]
+      },
+    },
+    async execute(args: {
+      element: string
+      dimensions?: string[]
+      judge_provider?: string
+    }, exec) {
+      exec.signal.throwIfAborted()
+      const sessionId = sessionIdOf(exec)
+      const cwd = resolveCwd(sessionId)
+      // 1. Resolve the element (throws "not-found" when the filePath isn't on the canvas).
+      await canvas.ensureHydrated(sessionId)
+      const el = canvas.getElementByPath(sessionId, args.element)
+      if (el.kind !== 'image' && el.kind !== 'video' && el.kind !== 'audio') {
+        throw new AigcError('bad-request', `aigc_assess only assesses image / video / audio elements; "${args.element}" is a ${el.kind} element`)
+      }
+      // 2. Resolve the dimensions (default to the standard three).
+      const dimensions = Array.isArray(args.dimensions) && args.dimensions.length > 0
+        ? args.dimensions.filter(d => typeof d === 'string' && d !== '')
+        : Array.from(DEFAULT_ASSESS_DIMENSIONS)
+      if (dimensions.length === 0) {
+        throw new AigcError('bad-request', 'dimensions must be a non-empty array of non-empty strings')
+      }
+      // 3. Resolve the judge provider (throws for unknown ids).
+      const judge = getProvider(args.judge_provider)
+      // 4. Stub path: return synthetic scores without any network call.
+      if (isStubEndpoint(judge.endpoint)) {
+        const stubScores: Record<string, number> = {}
+        for (const dim of dimensions) stubScores[dim] = 80
+        const overall = Math.round(Object.values(stubScores).reduce((a, b) => a + b, 0) / dimensions.length)
+        return {
+          scores: stubScores,
+          overall,
+          reason: `[stub] synthetic assessment from provider "${judge.id}" — no real judge API was called`,
+          recommendation: 'accept' as const,
+        }
+      }
+      // 5. Real judge: read the element file as a data URI for the chat body.
+      const dataUri = await readAsBase64(el.filePath, cwd, true)
+      // 6. Build the chat completions body — OpenAI multimodal format.
+      const dimList = dimensions.map(d => `- ${d} (0-100)`).join('\n')
+      const dimShape = dimensions.map(d => `"${d}": <0-100>`).join(', ')
+      const promptText = el.promptText ?? '(no prompt was recorded for this element)'
+      const assessPrompt =
+        `You are an AIGC quality assessor. Evaluate the provided media file.\n`
+        + `The original generation prompt was: "${promptText}"\n\n`
+        + `Score each dimension from 0 to 100:\n${dimList}\n\n`
+        + `Return ONLY a JSON object with this exact shape (no other text, no markdown fences):\n`
+        + `{\n`
+        + `  "scores": { ${dimShape} },\n`
+        + `  "overall": <0-100>,\n`
+        + `  "reason": "<one short sentence>",\n`
+        + `  "recommendation": "accept" | "reroll" | "reroll_with_adjustments",\n`
+        + `  "adjustments": { "prompt_delta": "<optional, only when reroll_with_adjustments>" }\n`
+        + `}`
+      const body = JSON.stringify({
+        model: 'gpt-4o',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: assessPrompt },
+            { type: 'image_url', image_url: { url: dataUri } },
+          ],
+        }],
+      })
+      // 7. Execute the request via the same HTTP executor as aigc_http_request.
+      const result = await executeProviderRequest(judge, {
+        method: 'POST',
+        path: '/v1/chat/completions',
+        body,
+      }, { timeoutMs: getTimeoutMs(), signal: exec.signal })
+      if (!result.ok) {
+        throw new AigcError(
+          'backend-error',
+          `judge provider "${judge.id}" returned HTTP ${result.status} (${result.contentType}): ${result.text.slice(0, 500)}`,
+          result.status >= 400 && result.status < 500 ? 400 : 502,
+        )
+      }
+      // 8. Extract the assistant message content from the chat completion body.
+      const responseText = result.kind === 'json' || result.kind === 'text' ? result.text : ''
+      const content = extractChatContent(responseText)
+      if (content === '') {
+        throw new AigcError('backend-error', `judge provider "${judge.id}" returned no assistant message content (raw response: ${responseText.slice(0, 500)})`)
+      }
+      // 9. Parse the assessment JSON from the content (handles raw JSON, markdown fences, and embedded JSON).
+      const parsed = parseAssessmentJson(content)
+      if (parsed === null) {
+        throw new AigcError('backend-error', `judge provider "${judge.id}" did not return valid assessment JSON (content: ${content.slice(0, 500)})`)
+      }
+      // 10. Coerce the parsed payload into the canonical return shape.
+      const scores: Record<string, number> = {}
+      const rawScores = parsed.scores
+      const scoresObj = typeof rawScores === 'object' && rawScores !== null && !Array.isArray(rawScores)
+        ? rawScores as Record<string, unknown>
+        : {}
+      for (const dim of dimensions) {
+        const v = scoresObj[dim]
+        scores[dim] = typeof v === 'number' && Number.isFinite(v) ? clamp(v, 0, 100) : 0
+      }
+      const overallRaw = parsed.overall
+      const overall = typeof overallRaw === 'number' && Number.isFinite(overallRaw)
+        ? clamp(overallRaw, 0, 100)
+        : Math.round(Object.values(scores).reduce((a, b) => a + b, 0) / dimensions.length)
+      const reason = typeof parsed.reason === 'string' ? parsed.reason : ''
+      const recommendation = parseRecommendation(parsed.recommendation)
+      const adjustments = parsed.adjustments !== undefined ? parsed.adjustments : undefined
+      return {
+        scores,
+        overall,
+        reason,
+        recommendation,
+        ...(adjustments !== undefined ? { adjustments } : {}),
+      }
+    },
+  }))
+
+  // ══ aigc_library_promote ═══════════════════════════════════════════════
+  register(defineTool({
+    name: 'aigc_library_promote',
+    description:
+      'Promote one canvas element to the cross-session asset library (per docs/product/04-ux-reliability.md §6). '
+      + 'The element\'s file is COPIED into ~/.dsh/aigc-canvas/library/ (images/ or prompts/), so the asset '
+      + 'survives session teardown and can be referenced by future sessions. '
+      + 'Use this for style references, subject references, prompt templates, voice samples, or final products '
+      + 'the user wants to reuse. After promoting, call aigc_library_list / aigc_library_get to retrieve the '
+      + 'asset\'s filePath and reference it in aigc_http_request via the {"$base64": "<path>"} placeholder.',
+    parameters: {
+      element_path: {
+        type: 'string',
+        required: true,
+        description: 'filePath of the canvas element to promote (must exist on the current session\'s canvas).',
+      },
+      category: {
+        type: 'string',
+        required: true,
+        enum: ASSET_CATEGORIES as readonly string[],
+        description: 'Asset category. style-reference / subject-reference / prompt-template / voice-sample / final-product.',
+      },
+      title: { type: 'string', description: 'Display title for the asset. Defaults to the element\'s title.' },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Free-form tags for filtering (e.g. ["cyberpunk", "cat"]).',
+      },
+      original_prompt: { type: 'string', description: 'The prompt used to generate the original element (for later recall). Defaults to the element\'s promptText.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          asset_id: { type: 'string', required: true, description: 'The new asset id (pass to aigc_library_get / aigc_library_remove).' },
+          file_path: { type: 'string', required: true, description: 'Absolute path of the copied asset file in the library.' },
+          type: { type: 'string', required: true, enum: ['image', 'prompt', 'audio', 'video'] },
+          title: { type: 'string', required: true },
+          category: { type: 'string', required: true, enum: ASSET_CATEGORIES as readonly string[] },
+        },
+      },
+      render: textRender((v: { asset_id: string; file_path: string; title: string; category: string }) =>
+        `Promoted "${v.title}" to asset library as ${v.asset_id} (${v.category}). File: ${v.file_path}.`,
+      ),
+    },
+    async execute(args: {
+      element_path: string
+      category: string
+      title?: string
+      tags?: string[]
+      original_prompt?: string
+    }, exec) {
+      exec.signal.throwIfAborted()
+      const sessionId = sessionIdOf(exec)
+      await canvas.ensureHydrated(sessionId)
+      const el = canvas.getElementByPath(sessionId, args.element_path)
+      const category = coerceAssetCategory(args.category)
+      const asset = await promoteAsset({
+        sourceFilePath: el.filePath,
+        category,
+        title: args.title ?? el.title,
+        tags: args.tags,
+        originalPrompt: args.original_prompt ?? el.promptText,
+        sourceSessionId: sessionId,
+        sourceElementPath: el.filePath,
+        ...(el.mediaSize !== undefined ? { metadata: { mediaSize: el.mediaSize } } : {}),
+      })
+      return {
+        asset_id: asset.id,
+        file_path: resolveAssetPath(asset.filePath),
+        type: asset.type,
+        title: asset.title,
+        category: asset.category,
+      }
+    },
+  }))
+
+  // ══ aigc_library_list ═══════════════════════════════════════════════════
+  register(defineTool({
+    name: 'aigc_library_list',
+    description:
+      'List assets in the cross-session library (per docs/product/04-ux-reliability.md §6). '
+      + 'Filters are AND-combined: e.g. passing category=style-reference + tags=["cyberpunk"] returns only '
+      + 'style-reference assets tagged "cyberpunk". '
+      + 'Pass search for a case-insensitive substring match over title + originalPrompt + tags. '
+      + 'The library is cross-session — assets promoted in any session are visible here. '
+      + 'Use aigc_library_get to fetch one asset\'s absolute filePath for use in aigc_http_request.',
+    parameters: {
+      type: {
+        type: 'string',
+        enum: ['image', 'prompt', 'audio', 'video'],
+        description: 'Filter by asset file type.',
+      },
+      category: {
+        type: 'string',
+        enum: ASSET_CATEGORIES as readonly string[],
+        description: 'Filter by asset category.',
+      },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Filter: assets matching ALL of these tags are returned.',
+      },
+      search: {
+        type: 'string',
+        description: 'Case-insensitive substring search over title + originalPrompt + tags.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          assets: {
+            type: 'array',
+            required: true,
+            description: 'Matching assets (sorted by createdAt ascending).',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                type: { type: 'string', required: true, enum: ['image', 'prompt', 'audio', 'video'] },
+                filePath: { type: 'string', required: true, description: 'Relative path under the library root.' },
+                title: { type: 'string', required: true },
+                tags: { type: 'array', required: true, items: { type: 'string' } },
+                category: { type: 'string', required: true, enum: ASSET_CATEGORIES as readonly string[] },
+                originalPrompt: { type: 'string' },
+                sourceSessionId: { type: 'string' },
+                sourceElementPath: { type: 'string' },
+                createdAt: { type: 'integer', required: true },
+                metadata: { type: 'json' },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => {
+        const v = value as { assets: Asset[] }
+        if (v.assets.length === 0) {
+          return [{ type: 'text', text: 'Asset library is empty (no assets match the filter).' }]
+        }
+        const lines = v.assets.map(a => `  ${a.id}  [${a.type}/${a.category}]  "${a.title}"  tags:${a.tags.length > 0 ? a.tags.join(',') : '(none)'}`)
+        return [{
+          type: 'text',
+          text: `Asset library (${v.assets.length} asset(s)):\n${lines.join('\n')}\nCall aigc_library_get with an asset id to get its absolute file_path.`,
+        }]
+      },
+    },
+    async execute(args: {
+      type?: string
+      category?: string
+      tags?: string[]
+      search?: string
+    }) {
+      const filter: { type?: AssetType; category?: AssetCategory; tags?: string[]; search?: string } = {}
+      if (args.type !== undefined) {
+        if (!['image', 'prompt', 'audio', 'video'].includes(args.type)) {
+          throw new AigcError('bad-request', `type must be one of: image, prompt, audio, video`)
+        }
+        filter.type = args.type as AssetType
+      }
+      if (args.category !== undefined) {
+        filter.category = coerceAssetCategory(args.category)
+      }
+      if (args.tags !== undefined) {
+        if (!Array.isArray(args.tags)) {
+          throw new AigcError('bad-request', 'tags must be an array of strings')
+        }
+        filter.tags = args.tags
+      }
+      if (args.search !== undefined && args.search !== '') {
+        filter.search = args.search
+      }
+      const assets = await listAssets(filter)
+      return { assets }
+    },
+  }))
+
+  // ══ aigc_library_get ════════════════════════════════════════════════════
+  register(defineTool({
+    name: 'aigc_library_get',
+    description:
+      'Get one asset\'s full details + absolute file_path (per docs/product/04-ux-reliability.md §6). '
+      + 'The returned file_path can be passed to aigc_http_request via the {"$base64": "<file_path>"} placeholder '
+      + 'to embed the asset\'s content in a provider request body. '
+      + 'Note: the file_path is inside the library directory (NOT the session canvas dir), so the $base64 '
+      + 'containment check will reject it — copy the bytes via your file tools first, or use the filePath '
+      + 'for direct reference in pipeline steps that don\'t go through $base64.',
+    parameters: {
+      asset_id: { type: 'string', required: true, description: 'The asset id (from aigc_library_list).' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', required: true },
+          type: { type: 'string', required: true, enum: ['image', 'prompt', 'audio', 'video'] },
+          file_path: { type: 'string', required: true, description: 'Absolute path of the asset file on disk.' },
+          title: { type: 'string', required: true },
+          tags: { type: 'array', required: true, items: { type: 'string' } },
+          category: { type: 'string', required: true, enum: ASSET_CATEGORIES as readonly string[] },
+          originalPrompt: { type: 'string' },
+          sourceSessionId: { type: 'string' },
+          sourceElementPath: { type: 'string' },
+          createdAt: { type: 'integer', required: true },
+          metadata: { type: 'json' },
+        },
+      },
+      render: textRender((v: { id: string; title: string; type: string; category: string; file_path: string }) =>
+        `Asset "${v.title}" (${v.id}) [${v.type}/${v.category}] file: ${v.file_path}`,
+      ),
+    },
+    async execute(args: { asset_id: string }) {
+      if (typeof args.asset_id !== 'string' || args.asset_id === '') {
+        throw new AigcError('bad-request', 'asset_id is required')
+      }
+      const asset = await getAsset(args.asset_id)
+      const { absoluteFilePath, ...rest } = asset
+      return { ...rest, file_path: absoluteFilePath }
+    },
+  }))
+
+  // ══ aigc_library_remove ═════════════════════════════════════════════════
+  register(defineTool({
+    name: 'aigc_library_remove',
+    description:
+      'Remove one asset from the cross-session library (per docs/product/04-ux-reliability.md §6). '
+      + 'Deletes the asset\'s file copy from disk AND removes the record from index.json. '
+      + 'Idempotent: removing an unknown asset_id returns removed=false (no error).',
+    parameters: {
+      asset_id: { type: 'string', required: true, description: 'The asset id to remove (from aigc_library_list).' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          removed: { type: 'boolean', required: true, description: 'true when the asset existed and was removed; false when the id was unknown.' },
+          asset_id: { type: 'string', required: true },
+        },
+      },
+      render: textRender((v: { removed: boolean; asset_id: string }) =>
+        v.removed ? `Removed asset ${v.asset_id}.` : `Asset ${v.asset_id} not found (no change).`,
+      ),
+    },
+    async execute(args: { asset_id: string }) {
+      if (typeof args.asset_id !== 'string' || args.asset_id === '') {
+        throw new AigcError('bad-request', 'asset_id is required')
+      }
+      const removed = await removeAsset(args.asset_id)
+      return { removed, asset_id: args.asset_id }
+    },
+  }))
+
   // ══ aigc_canvas_place ═══════════════════════════════════════════════════
   register(defineTool({
     name: 'aigc_canvas_place',
@@ -2174,6 +3002,77 @@ function gridPositionsRightOf(srcX: number, srcY: number, count: number): Array<
     positions.push({
       x: startX + col * (NODE_W + GAP_X),
       y: topY + row * (NODE_H + GAP_Y),
+    })
+  }
+  return positions
+}
+
+/**
+ * Compute positions for `count` variation elements placed relative to a
+ * source element (or at the auto-position anchor when there is no source).
+ * Three layouts:
+ *  - "grid": 2-column grid to the right of the source (or starting at the
+ *    anchor when hasSource is false). Delegates to gridPositionsRightOf
+ *    when a source exists.
+ *  - "row": single horizontal row starting to the right of the source
+ *    (or at the anchor when hasSource is false), at the source's y.
+ *  - "column": single vertical column starting to the right of the source
+ *    (or at the anchor when hasSource is false), stacked below the source.
+ *
+ * Uses the same NODE_W (240) + NODE_H (110) + gaps as gridPositionsRightOf
+ * so variation layout matches the existing reroll grid visually.
+ */
+function variationPositions(
+  srcX: number,
+  srcY: number,
+  count: number,
+  layout: 'grid' | 'row' | 'column',
+  hasSource: boolean,
+): Array<{ x: number; y: number }> {
+  const NODE_W = 240
+  const NODE_H = 110
+  const GAP_X = 20
+  const GAP_Y = 16
+  // When a source exists, place variants to its right (matching gridPositionsRightOf).
+  // When no source, start at the anchor position itself.
+  const startX = hasSource ? srcX + NODE_W + GAP_X : srcX
+  if (layout === 'grid') {
+    if (hasSource) {
+      return gridPositionsRightOf(srcX, srcY, count)
+    }
+    // No source: 2-column grid starting at (srcX, srcY), vertically centered.
+    const cols = count <= 2 ? count : 2
+    const rows = Math.ceil(count / cols)
+    const totalH = rows * NODE_H + (rows - 1) * GAP_Y
+    const topY = srcY + NODE_H / 2 - totalH / 2
+    const positions: Array<{ x: number; y: number }> = []
+    for (let i = 0; i < count; i++) {
+      const col = i % cols
+      const row = Math.floor(i / cols)
+      positions.push({
+        x: startX + col * (NODE_W + GAP_X),
+        y: topY + row * (NODE_H + GAP_Y),
+      })
+    }
+    return positions
+  }
+  if (layout === 'row') {
+    // Single horizontal row at the source's y.
+    const positions: Array<{ x: number; y: number }> = []
+    for (let i = 0; i < count; i++) {
+      positions.push({
+        x: startX + i * (NODE_W + GAP_X),
+        y: srcY,
+      })
+    }
+    return positions
+  }
+  // layout === 'column': single vertical column stacked below the source.
+  const positions: Array<{ x: number; y: number }> = []
+  for (let i = 0; i < count; i++) {
+    positions.push({
+      x: startX,
+      y: srcY + i * (NODE_H + GAP_Y),
     })
   }
   return positions

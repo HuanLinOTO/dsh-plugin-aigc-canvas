@@ -22,6 +22,7 @@ import type { ResolvedAigcProvider } from '../src/config.js'
 import type { EndpointSpec } from '../src/endpoint-catalog.js'
 import { getLogEntries, clearLogEntries, redactSecrets, type RequestLogEntry } from '../src/request-log.js'
 import { calculateCallCost, recordCallCost, getSessionCost, clearSessionCost } from '../src/cost-tracker.js'
+import { setLibraryDir, resetLibraryDir } from '../src/asset-library.js'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 function execFor(sessionId: string): ToolRunContext {
@@ -241,8 +242,9 @@ describe('registerTools (stub provider)', () => {
     await rm(cwd, { recursive: true, force: true })
   })
 
-  it('registers exactly fourteen tools', () => {
+  it('registers exactly twenty tools', () => {
     expect(Array.from(ctx.registered.keys()).sort()).toEqual([
+      'aigc_assess',
       'aigc_canvas_link',
       'aigc_canvas_list_elements',
       'aigc_canvas_place',
@@ -251,12 +253,17 @@ describe('registerTools (stub provider)', () => {
       'aigc_get_endpoint_details',
       'aigc_get_provider_info',
       'aigc_http_request',
+      'aigc_library_get',
+      'aigc_library_list',
+      'aigc_library_promote',
+      'aigc_library_remove',
       'aigc_media_edit',
       'aigc_probe_endpoint',
       'aigc_provider_get_instructions',
       'aigc_provider_set_endpoints',
       'aigc_provider_set_instructions',
       'aigc_reroll',
+      'aigc_variation',
     ])
   })
 
@@ -1134,10 +1141,55 @@ describe('registerTools (stub provider)', () => {
     }
   })
 
-  it('dispose unregisters all fourteen tools', () => {
-    expect(ctx.registered.size).toBe(14)
+  it('dispose unregisters all twenty tools', () => {
+    expect(ctx.registered.size).toBe(20)
     dispose()
     expect(ctx.registered.size).toBe(0)
+  })
+
+  // ── aigc_assess (agent self-critique, per docs/product/01-agent-autonomy.md §6) ──
+
+  it('aigc_assess returns synthetic scores when the judge provider is a stub', async () => {
+    // Generate + place an image element so aigc_assess has something to read.
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    const generated = await httpTool.execute({
+      method: 'POST',
+      path: '/v1/images/generations',
+      body: '{"prompt":"a cat sitting on grass"}',
+    }, execFor('s1')) as { file_path: string }
+    await placeTool.execute({ description: 'cat', file_path: generated.file_path, x: 0, y: 0 }, execFor('s1'))
+    const tool = ctx.registered.get('aigc_assess')!
+    const result = await tool.execute({ element: generated.file_path }, execFor('s1')) as {
+      scores: Record<string, number>
+      overall: number
+      reason: string
+      recommendation: string
+      adjustments?: unknown
+    }
+    // Default dimensions are returned as the scores keys.
+    expect(Object.keys(result.scores).sort()).toEqual(['prompt_match', 'quality', 'sfw'])
+    // All scores are in [0, 100].
+    for (const v of Object.values(result.scores)) {
+      expect(v).toBeGreaterThanOrEqual(0)
+      expect(v).toBeLessThanOrEqual(100)
+    }
+    // Overall is the average of the three default dimension scores.
+    const sum = Object.values(result.scores).reduce((a, b) => a + b, 0)
+    expect(result.overall).toBe(Math.round(sum / 3))
+    // Stub path: no real API call → reason mentions "stub" + the provider id.
+    expect(result.reason).toContain('stub')
+    expect(result.reason).toContain('"stub"')
+    // Recommendation is one of the documented enum values.
+    expect(['accept', 'reroll', 'reroll_with_adjustments']).toContain(result.recommendation)
+    // Stub path returns "accept" (no adjustments needed for synthetic scores).
+    expect(result.recommendation).toBe('accept')
+    expect(result.adjustments).toBeUndefined()
+  })
+
+  it('aigc_assess throws an AigcError for an unknown element filePath', async () => {
+    const tool = ctx.registered.get('aigc_assess')!
+    await expect(tool.execute({ element: '/nonexistent/path/not-on-canvas.png' }, execFor('s1'))).rejects.toThrow(AigcError)
   })
 
   // ── aigc_get_endpoint_details / aigc_provider_set_endpoints / aigc_probe_endpoint ──
@@ -1414,6 +1466,92 @@ describe('registerTools (stub provider)', () => {
     const variant = listed.elements.find(e => e.filePath === result.elements[0]!.filePath)!
     expect(variant.meta?.originalRequest?.body?.prompt).toBe('a dog')
     expect(variant.meta?.originalRequest?.body?.seed).toBe(7)
+  })
+
+  // ── aigc_variation ────────────────────────────────────────────────────────
+
+  it('aigc_variation is registered', () => {
+    expect(ctx.registered.get('aigc_variation')).toBeDefined()
+  })
+
+  it('aigc_variation generates N variants in a grid with variation_of + alternative_of edges', async () => {
+    const source = await placeGeneratedImage('a cat')
+    const variationTool = ctx.registered.get('aigc_variation')!
+    const result = await variationTool.execute({
+      source_element: source,
+      count: 3,
+      strategy: 'seed',
+    }, execFor('s1')) as {
+      cluster_id: string; elements: Array<{ filePath: string; kind: string; x: number; y: number }>
+    }
+    expect(result.cluster_id).toBeTruthy()
+    expect(result.elements).toHaveLength(3)
+    for (const el of result.elements) {
+      expect(el.kind).toBe('image')
+      expect(el.filePath).toMatch(/\.png$/)
+    }
+    // All variants should be on the canvas + wired with the right edges.
+    const listTool = ctx.registered.get('aigc_canvas_list_elements')!
+    const listed = await listTool.execute({}, execFor('s1')) as { edges: Array<{ source: string; target: string; relation: string }> }
+    // 3 variation_of edges (source → each variant) + 3×2=6 alternative_of edges (each pair, complete graph K3).
+    const varEdges = listed.edges.filter(e => e.relation === 'variation_of')
+    expect(varEdges).toHaveLength(3)
+    const altEdges = listed.edges.filter(e => e.relation === 'alternative_of')
+    expect(altEdges).toHaveLength(6) // complete graph K3 = 3*2 = 6
+  })
+
+  it('aigc_variation throws when the source element has no meta.originalRequest', async () => {
+    // Place an external file (not from aigc_http_request) → no originalRequest.
+    const dir = canvasDirFor(cwd, 's1')
+    await mkdir(dir, { recursive: true })
+    const external = join(dir, 'external-variation.png')
+    await writeFile(external, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    const placed = await placeTool.execute({ description: 'ext', file_path: external, x: 0, y: 0 }, execFor('s1')) as { element_path: string }
+    const variationTool = ctx.registered.get('aigc_variation')!
+    await expect(variationTool.execute({
+      source_element: placed.element_path,
+      count: 2,
+      strategy: 'seed',
+    }, execFor('s1'))).rejects.toThrow(AigcError)
+  })
+
+  it('aigc_variation caps count to [2, 8]', async () => {
+    const source = await placeGeneratedImage('a cat')
+    const variationTool = ctx.registered.get('aigc_variation')!
+    // count=1 → clamped up to 2
+    const resultMin = await variationTool.execute({
+      source_element: source,
+      count: 1,
+      strategy: 'seed',
+    }, execFor('s1')) as { elements: Array<{ filePath: string }> }
+    expect(resultMin.elements).toHaveLength(2)
+    // count=100 → clamped down to 8
+    const resultMax = await variationTool.execute({
+      source_element: source,
+      count: 100,
+      strategy: 'seed',
+    }, execFor('s1')) as { elements: Array<{ filePath: string }> }
+    expect(resultMax.elements).toHaveLength(8)
+  })
+
+  it('aigc_variation with strategy=prompt_perturb appends perturb text to each variant', async () => {
+    const source = await placeGeneratedImage('a cat')
+    const variationTool = ctx.registered.get('aigc_variation')!
+    const result = await variationTool.execute({
+      source_element: source,
+      count: 2,
+      strategy: 'prompt_perturb',
+      prompt_perturb: 'more cinematic',
+    }, execFor('s1')) as { elements: Array<{ filePath: string }> }
+    expect(result.elements).toHaveLength(2)
+    // Each variant's meta.originalRequest.body.prompt should have the perturb text appended.
+    const listTool = ctx.registered.get('aigc_canvas_list_elements')!
+    const listed = await listTool.execute({}, execFor('s1')) as { elements: Array<{ filePath: string; meta?: { originalRequest?: { body?: { prompt?: string } } } }> }
+    for (const variantEl of result.elements) {
+      const variant = listed.elements.find(e => e.filePath === variantEl.filePath)!
+      expect(variant.meta?.originalRequest?.body?.prompt).toBe('a cat more cinematic')
+    }
   })
 
   it('aigc_media_edit is registered', () => {
@@ -1880,5 +2018,88 @@ describe('registerTools (real endpoint through mocked fetch)', () => {
     } finally {
       register.dispose()
     }
+  })
+})
+
+// ── Asset library tools (per docs/product/04-ux-reliability.md §6) ───────
+describe('registerTools (asset library tools)', () => {
+  let cwd: string
+  let canvas: AigcCanvasService
+  let ctx: MockTools
+  let dispose: () => void
+  let libDir: string
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'aigc-lib-tools-'))
+    libDir = await mkdtemp(join(tmpdir(), 'aigc-lib-dir-'))
+    canvas = createAigcCanvasService(() => cwd)
+    ctx = mockCtx()
+    setLibraryDir(libDir)
+    dispose = registerAll(ctx, [STUB_PROVIDER], canvas, cwd).dispose
+  })
+
+  afterEach(async () => {
+    dispose()
+    resetLibraryDir()
+    await rm(cwd, { recursive: true, force: true })
+    await rm(libDir, { recursive: true, force: true })
+  })
+
+  it('aigc_library_promote copies a canvas element into the library and returns the asset', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const gen = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', json_body: { prompt: 'a cat' } }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    await placeTool.execute({ description: 'cat', file_path: gen.file_path, x: 0, y: 0 }, execFor('s1'))
+    const promoteTool = ctx.registered.get('aigc_library_promote')!
+    const result = await promoteTool.execute({
+      element_path: gen.file_path,
+      category: 'style-reference',
+      title: 'cyberpunk cat',
+      tags: ['cyberpunk', 'cat'],
+    }, execFor('s1')) as { asset_id: string; file_path: string; type: string; title: string; category: string }
+    expect(result.asset_id).toMatch(/^asset_/)
+    expect(result.type).toBe('image')
+    expect(result.title).toBe('cyberpunk cat')
+    expect(result.category).toBe('style-reference')
+    expect(result.file_path).toContain(libDir)
+    // The promoted file exists on disk.
+    const info = await stat(result.file_path)
+    expect(info.isFile()).toBe(true)
+  })
+
+  it('aigc_library_list returns promoted assets and aigc_library_get fetches one by id', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const gen = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', json_body: { prompt: 'a dog' } }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    await placeTool.execute({ description: 'dog', file_path: gen.file_path, x: 0, y: 0 }, execFor('s1'))
+    const promoteTool = ctx.registered.get('aigc_library_promote')!
+    const promoted = await promoteTool.execute({ element_path: gen.file_path, category: 'final-product', tags: ['winner'] }, execFor('s1')) as { asset_id: string }
+    const listTool = ctx.registered.get('aigc_library_list')!
+    const list = await listTool.execute({ category: 'final-product' }, execFor('s1')) as { assets: Array<{ id: string; title: string; tags: string[] }> }
+    expect(list.assets).toHaveLength(1)
+    expect(list.assets[0]!.id).toBe(promoted.asset_id)
+    expect(list.assets[0]!.tags).toContain('winner')
+    const getTool = ctx.registered.get('aigc_library_get')!
+    const got = await getTool.execute({ asset_id: promoted.asset_id }, execFor('s1')) as { id: string; file_path: string; title: string }
+    expect(got.id).toBe(promoted.asset_id)
+    expect(got.file_path).toContain(libDir)
+  })
+
+  it('aigc_library_remove deletes an asset and aigc_library_get then throws', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const gen = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', json_body: { prompt: 'to-remove' } }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    await placeTool.execute({ description: 'tmp', file_path: gen.file_path, x: 0, y: 0 }, execFor('s1'))
+    const promoteTool = ctx.registered.get('aigc_library_promote')!
+    const promoted = await promoteTool.execute({ element_path: gen.file_path, category: 'style-reference' }, execFor('s1')) as { asset_id: string }
+    const removeTool = ctx.registered.get('aigc_library_remove')!
+    const removed = await removeTool.execute({ asset_id: promoted.asset_id }, execFor('s1')) as { removed: boolean }
+    expect(removed.removed).toBe(true)
+    // Second removal returns false (idempotent).
+    const again = await removeTool.execute({ asset_id: promoted.asset_id }, execFor('s1')) as { removed: boolean }
+    expect(again.removed).toBe(false)
+    // getAsset now throws not-found.
+    const getTool = ctx.registered.get('aigc_library_get')!
+    await expect(getTool.execute({ asset_id: promoted.asset_id }, execFor('s1'))).rejects.toThrow(AigcError)
   })
 })

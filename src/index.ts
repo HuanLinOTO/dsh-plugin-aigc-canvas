@@ -44,6 +44,14 @@ import { registerTools, type ProviderInfo } from './tools.js'
 import { AigcError, readJsonBody, requireString, writeError, writeJson, writeOk } from './wire.js'
 import { getLogEntries, clearLogEntries, type RequestLogEntry } from './request-log.js'
 import { getSessionCost, clearSessionCost, type SessionCost } from './cost-tracker.js'
+import {
+  coerceAssetCategory,
+  promoteAsset,
+  listAssets,
+  removeAsset,
+  type AssetCategory,
+  type AssetType,
+} from './asset-library.js'
 
 export { Config }
 export type { AigcCanvasConfig, AigcProvider, ResolvedAigcConfig, ResolvedAigcProvider }
@@ -267,6 +275,58 @@ function buildApi(
       const sessionId = requireString(payload, 'sessionId')
       clearSessionCost(sessionId)
       return { ok: true }
+    },
+    'library.list': async (payload) => {
+      const record = payload as Record<string, unknown> | null
+      const filter: { type?: AssetType; category?: AssetCategory; tags?: string[]; search?: string } = {}
+      if (record?.type !== undefined) {
+        if (typeof record.type !== 'string' || !['image', 'prompt', 'audio', 'video'].includes(record.type)) {
+          throw new AigcError('bad-request', 'type must be one of: image, prompt, audio, video')
+        }
+        filter.type = record.type as AssetType
+      }
+      if (record?.category !== undefined) {
+        filter.category = coerceAssetCategory(record.category)
+      }
+      if (record?.tags !== undefined) {
+        if (!Array.isArray(record.tags)) {
+          throw new AigcError('bad-request', 'tags must be an array of strings')
+        }
+        filter.tags = record.tags as string[]
+      }
+      if (typeof record?.search === 'string' && record.search !== '') {
+        filter.search = record.search
+      }
+      const assets = await listAssets(filter)
+      return { assets }
+    },
+    'library.promote': async (payload) => {
+      const sessionId = requireString(payload, 'sessionId')
+      const uuid = requireString(payload, 'uuid')
+      const record = payload as Record<string, unknown> | null
+      const category = coerceAssetCategory(record?.category)
+      await canvas.ensureHydrated(sessionId)
+      const el = canvas.getElement(sessionId, uuid)
+      const asset = await promoteAsset({
+        sourceFilePath: el.filePath,
+        category,
+        title: typeof record?.title === 'string' ? record.title : el.title,
+        tags: Array.isArray(record?.tags) ? record.tags as string[] : undefined,
+        originalPrompt: el.promptText,
+        sourceSessionId: sessionId,
+        sourceElementPath: el.filePath,
+        ...(el.mediaSize !== undefined ? { metadata: { mediaSize: el.mediaSize } } : {}),
+      })
+      return { asset }
+    },
+    'library.remove': async (payload) => {
+      const record = payload as { asset_id?: unknown } | null
+      const assetId = record?.asset_id
+      if (typeof assetId !== 'string' || assetId === '') {
+        throw new AigcError('bad-request', 'asset_id is required')
+      }
+      const removed = await removeAsset(assetId)
+      return { removed, asset_id: assetId }
     },
   }
 }

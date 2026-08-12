@@ -237,3 +237,54 @@ export interface SessionCost {
 export function fetchSessionCost(sessionId: string, signal?: AbortSignal): Promise<SessionCost> {
   return call<SessionCost>('cost.get', { sessionId }, signal)
 }
+
+// ── Asset library (per docs/product/04-ux-reliability.md §6) ─────────────
+
+/** Asset category (matches the host AssetCategory enum). */
+export type AssetCategory =
+  | 'style-reference'
+  | 'subject-reference'
+  | 'prompt-template'
+  | 'voice-sample'
+  | 'final-product'
+
+/** Asset file type. */
+export type AssetType = 'image' | 'prompt' | 'audio' | 'video'
+
+/** One asset in the cross-session library (client view). */
+export interface LibraryAsset {
+  id: string
+  type: AssetType
+  filePath: string
+  title: string
+  tags: string[]
+  category: AssetCategory
+  originalPrompt?: string
+  sourceSessionId?: string
+  sourceElementPath?: string
+  createdAt: number
+  metadata?: Record<string, unknown>
+}
+
+/** Optional filters for {@link fetchLibraryAssets}. */
+export interface LibraryAssetFilter {
+  type?: AssetType
+  category?: AssetCategory
+  tags?: string[]
+  search?: string
+}
+
+/** List assets in the cross-session library (with optional filters). */
+export function fetchLibraryAssets(filter?: LibraryAssetFilter, signal?: AbortSignal): Promise<{ assets: LibraryAsset[] }> {
+  return call<{ assets: LibraryAsset[] }>('library.list', { ...(filter ?? {}) } as Record<string, unknown>, signal)
+}
+
+/** Promote one canvas element (by uuid) to the asset library. */
+export function promoteAsset(sessionId: string, uuid: string, opts: { category: AssetCategory; title?: string; tags?: string[] }, signal?: AbortSignal): Promise<{ asset: LibraryAsset }> {
+  return call<{ asset: LibraryAsset }>('library.promote', { sessionId, uuid, ...opts }, signal)
+}
+
+/** Remove one asset from the library (by id). Idempotent. */
+export function removeAsset(assetId: string, signal?: AbortSignal): Promise<{ removed: boolean; asset_id: string }> {
+  return call<{ removed: boolean; asset_id: string }>('library.remove', { asset_id: assetId }, signal)
+}

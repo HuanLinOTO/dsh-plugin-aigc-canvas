@@ -199,7 +199,7 @@ describe('registerTools (stub provider)', () => {
     await rm(cwd, { recursive: true, force: true })
   })
 
-  it('registers exactly nine tools', () => {
+  it('registers exactly ten tools', () => {
     expect(Array.from(ctx.registered.keys()).sort()).toEqual([
       'aigc_canvas_link',
       'aigc_canvas_list_elements',
@@ -210,6 +210,7 @@ describe('registerTools (stub provider)', () => {
       'aigc_media_edit',
       'aigc_provider_get_instructions',
       'aigc_provider_set_instructions',
+      'aigc_reroll',
     ])
   })
 
@@ -1023,10 +1024,150 @@ describe('registerTools (stub provider)', () => {
     }
   })
 
-  it('dispose unregisters all nine tools', () => {
-    expect(ctx.registered.size).toBe(9)
+  it('dispose unregisters all ten tools', () => {
+    expect(ctx.registered.size).toBe(10)
     dispose()
     expect(ctx.registered.size).toBe(0)
+  })
+
+  // ── aigc_reroll ──────────────────────────────────────────────────────────
+
+  /** Helper: generate + place an image element, return its filePath. */
+  async function placeGeneratedImage(prompt: string): Promise<string> {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const gen = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', json_body: { prompt, size: '1024x1024', seed: 42 } }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    const placed = await placeTool.execute({ description: 'src', file_path: gen.file_path, x: 0, y: 0 }, execFor('s1')) as { element_path: string }
+    return placed.element_path
+  }
+
+  it('aigc_reroll is registered', () => {
+    expect(ctx.registered.get('aigc_reroll')).toBeDefined()
+  })
+
+  it('aigc_reroll throws when the source element has no meta.originalRequest', async () => {
+    // Place an external file (not from aigc_http_request) → no originalRequest.
+    const dir = canvasDirFor(cwd, 's1')
+    await mkdir(dir, { recursive: true })
+    const external = join(dir, 'external-reroll.png')
+    await writeFile(external, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    const placed = await placeTool.execute({ description: 'ext', file_path: external, x: 0, y: 0 }, execFor('s1')) as { element_path: string }
+    const rerollTool = ctx.registered.get('aigc_reroll')!
+    await expect(rerollTool.execute({ source_element: placed.element_path }, execFor('s1'))).rejects.toThrow(AigcError)
+  })
+
+  it('aigc_reroll with no patch generates a variation_of edge to the source', async () => {
+    const source = await placeGeneratedImage('a cat')
+    const rerollTool = ctx.registered.get('aigc_reroll')!
+    const result = await rerollTool.execute({ source_element: source }, execFor('s1')) as {
+      elements: Array<{ filePath: string; kind: string }>; linked_to: string; relation: string
+    }
+    expect(result.elements).toHaveLength(1)
+    expect(result.elements[0]!.kind).toBe('image')
+    expect(result.linked_to).toBe(source)
+    expect(result.relation).toBe('variation_of')
+    // The new element should be on the canvas + wired to the source with variation_of.
+    const listTool = ctx.registered.get('aigc_canvas_list_elements')!
+    const listed = await listTool.execute({}, execFor('s1')) as { edges: Array<{ source: string; target: string; relation: string }> }
+    const rerollEdges = listed.edges.filter(e => e.target === result.elements[0]!.filePath)
+    expect(rerollEdges).toHaveLength(1)
+    expect(rerollEdges[0]!.source).toBe(source)
+    expect(rerollEdges[0]!.relation).toBe('variation_of')
+  })
+
+  it('aigc_reroll with prompt_delta generates a remix_of edge', async () => {
+    const source = await placeGeneratedImage('a cat')
+    const rerollTool = ctx.registered.get('aigc_reroll')!
+    const result = await rerollTool.execute({
+      source_element: source,
+      patch: { prompt_delta: ', sitting on a chair' },
+    }, execFor('s1')) as { relation: string; elements: Array<{ filePath: string }> }
+    expect(result.relation).toBe('remix_of')
+    expect(result.elements).toHaveLength(1)
+    // The new element should have the patched prompt in its meta.originalRequest.body.prompt.
+    const listTool = ctx.registered.get('aigc_canvas_list_elements')!
+    const listed = await listTool.execute({}, execFor('s1')) as { elements: Array<{ filePath: string; meta?: { originalRequest?: { body?: { prompt?: string } } } }> }
+    const rerolledEl = listed.elements.find(e => e.filePath === result.elements[0]!.filePath)!
+    expect(rerolledEl.meta?.originalRequest?.body?.prompt).toBe('a cat, sitting on a chair')
+  })
+
+  it('aigc_reroll with prompt_replace generates a remix_of edge', async () => {
+    const source = await placeGeneratedImage('a cat')
+    const rerollTool = ctx.registered.get('aigc_reroll')!
+    const result = await rerollTool.execute({
+      source_element: source,
+      patch: { prompt_replace: 'a dog' },
+    }, execFor('s1')) as { relation: string }
+    expect(result.relation).toBe('remix_of')
+  })
+
+  it('aigc_reroll with seed-only patch generates a variation_of edge', async () => {
+    const source = await placeGeneratedImage('a cat')
+    const rerollTool = ctx.registered.get('aigc_reroll')!
+    const result = await rerollTool.execute({
+      source_element: source,
+      patch: { seed: 999 },
+    }, execFor('s1')) as { relation: string }
+    expect(result.relation).toBe('variation_of')
+  })
+
+  it('aigc_reroll with count=4 wires alternative_of between all variants', async () => {
+    const source = await placeGeneratedImage('a cat')
+    const rerollTool = ctx.registered.get('aigc_reroll')!
+    const result = await rerollTool.execute({
+      source_element: source,
+      count: 4,
+    }, execFor('s1')) as { elements: Array<{ filePath: string }>; relation: string }
+    expect(result.elements).toHaveLength(4)
+    expect(result.relation).toBe('variation_of')
+    const listTool = ctx.registered.get('aigc_canvas_list_elements')!
+    const listed = await listTool.execute({}, execFor('s1')) as { edges: Array<{ source: string; target: string; relation: string }> }
+    // 4 variation_of edges (source → each variant) + 4×3=12 alternative_of edges (each pair).
+    const varEdges = listed.edges.filter(e => e.relation === 'variation_of')
+    expect(varEdges).toHaveLength(4)
+    const altEdges = listed.edges.filter(e => e.relation === 'alternative_of')
+    expect(altEdges.length).toBe(12) // complete graph K4
+  })
+
+  it('aigc_reroll caps count at 8', async () => {
+    const source = await placeGeneratedImage('a cat')
+    const rerollTool = ctx.registered.get('aigc_reroll')!
+    const result = await rerollTool.execute({
+      source_element: source,
+      count: 100, // should be capped to 8
+    }, execFor('s1')) as { elements: Array<{ filePath: string }> }
+    expect(result.elements).toHaveLength(8)
+  })
+
+  it('aigc_reroll places variants to the right of the source (grid layout)', async () => {
+    const source = await placeGeneratedImage('a cat')
+    // Move the source to a known position for the layout assertion.
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    void placeTool // source is already at (0,0) from placeGeneratedImage
+    const rerollTool = ctx.registered.get('aigc_reroll')!
+    const result = await rerollTool.execute({ source_element: source, count: 2 }, execFor('s1')) as {
+      elements: Array<{ x: number; y: number }>
+    }
+    // Both variants should be to the right of the source (x > 0 + 240 + 20 = 260).
+    for (const el of result.elements) {
+      expect(el.x).toBeGreaterThanOrEqual(260)
+    }
+  })
+
+  it('aigc_reroll preserves the patched body in the new element\'s meta.originalRequest (re-rerollable)', async () => {
+    const source = await placeGeneratedImage('a cat')
+    const rerollTool = ctx.registered.get('aigc_reroll')!
+    const result = await rerollTool.execute({
+      source_element: source,
+      patch: { prompt_replace: 'a dog', seed: 7 },
+    }, execFor('s1')) as { elements: Array<{ filePath: string }> }
+    // The new variant should have its own originalRequest (so it can be re-rerolled).
+    const listTool = ctx.registered.get('aigc_canvas_list_elements')!
+    const listed = await listTool.execute({}, execFor('s1')) as { elements: Array<{ filePath: string; meta?: { originalRequest?: { body?: { prompt?: string; seed?: number } } } }> }
+    const variant = listed.elements.find(e => e.filePath === result.elements[0]!.filePath)!
+    expect(variant.meta?.originalRequest?.body?.prompt).toBe('a dog')
+    expect(variant.meta?.originalRequest?.body?.seed).toBe(7)
   })
 
   it('aigc_media_edit is registered', () => {

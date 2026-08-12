@@ -1,5 +1,5 @@
 /**
- * The nine model-facing AIGC canvas tools.
+ * The ten model-facing AIGC canvas tools.
  *
  * Generation is provider-agnostic:
  *   aigc_get_provider_info             — list configured providers (id, name,
@@ -19,6 +19,11 @@
  *   aigc_provider_get_instructions     — fetch the FULL instructions for one
  *                                        provider (aigc_get_provider_info only
  *                                        shows a short preview).
+ *   aigc_reroll                        — re-generate an element based on its
+ *                                        meta.originalRequest, applying an optional
+ *                                        patch (seed/prompt_delta/prompt_replace/
+ *                                        size/...). Auto-wires variation_of or
+ *                                        remix_of edge from the source.
  *   aigc_canvas_place                  — place a file (typically the filePath
  *                                        aigc_http_request returned) onto the free
  *                                        canvas at position (x, y); optionally
@@ -348,6 +353,9 @@ export function registerTools(
   getTimeoutMs: () => number,
   getMediaLimit: () => number = () => 100 * 1024 * 1024,
 ): () => void {
+  // Wire the media-limit getter so module-level helpers (saveRerollResponse)
+  // can read the live value without it being threaded through every call.
+  _getMediaLimit = getMediaLimit
   const disposers: Array<() => void> = []
   const register = (tool: ReturnType<typeof defineTool>): void => {
     disposers.push(ctx.tools.register(tool))
@@ -798,6 +806,205 @@ export function registerTools(
       const provider = getProvider(args.provider_id) // throws for unknown ids
       const instructions = provider.instructions
       return Promise.resolve({ provider_id: args.provider_id, instructions, total_chars: instructions.length })
+    },
+  }))
+
+  // ══ aigc_reroll ═════════════════════════════════════════════════════════
+  register(defineTool({
+    name: 'aigc_reroll',
+    description:
+      'Re-generate one (or a few) elements based on an existing canvas element, applying an optional patch to the '
+      + 'original request. The source element MUST have been placed via aigc_canvas_place from a file produced by '
+      + 'aigc_http_request (so its meta.originalRequest is recorded — see aigc_canvas_list_elements). '
+      + 'host reads meta.originalRequest, applies the patch, calls the original provider, saves the new file, places '
+      + 'it on the canvas, and auto-wires an edge from the source to the new element with a semantic relation: '
+      + '"variation_of" when only the seed (or other non-prompt params) changed, "remix_of" when the prompt changed. '
+      + 'When count > 1, all variants are also wired to each other with "alternative_of" so they form a cluster. '
+      + 'This is the 1-step primitive for "this image\'s pose is wrong, regenerate with a different prompt" / '
+      + '"give me 4 variations of this image with different seeds" — no need to manually reconstruct the original '
+      + 'request body, call aigc_http_request, then aigc_canvas_place, then aigc_canvas_link.',
+    parameters: {
+      source_element: {
+        type: 'string',
+        required: true,
+        description: 'filePath of the source canvas element to reroll (must have meta.originalRequest — place it via '
+          + 'aigc_canvas_place first if it came from aigc_http_request).',
+      },
+      patch: {
+        type: 'json',
+        description: 'Optional patch applied to the original request body. Fields:\n'
+          + '  seed?: number — change the seed (when omitted AND the body has a seed field, a random seed is used)\n'
+          + '  prompt_delta?: string — append to the original prompt (relation becomes "remix_of")\n'
+          + '  prompt_replace?: string — completely replace the prompt (relation becomes "remix_of")\n'
+          + '  size?: string — change the size\n'
+          + '  Any other field overrides the corresponding body field directly (e.g. {duration: 10}).\n'
+          + 'When omitted entirely, only the seed is randomized (relation "variation_of").',
+      },
+      count: {
+        type: 'integer',
+        description: 'How many variants to generate (default 1, max 8). When > 1, all variants are placed in a grid '
+          + 'to the right of the source, all wired to the source with the same relation, and wired to each other '
+          + 'with "alternative_of".',
+      },
+      provider_id: {
+        type: 'string',
+        description: 'Override the original provider (default: use the source element\'s originalRequest.providerId). '
+          + 'Use this when the original provider is down or you want to compare providers.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          elements: {
+            type: 'array',
+            required: true,
+            description: 'The newly generated elements.',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                filePath: { type: 'string', required: true },
+                kind: { type: 'string', required: true, enum: ['prompt', 'image', 'video', 'audio'] },
+                title: { type: 'string', required: true },
+                x: { type: 'number', required: true },
+                y: { type: 'number', required: true },
+              },
+            },
+          },
+          linked_to: { type: 'string', required: true, description: 'filePath of the source element the variants were rerolled from.' },
+          relation: { type: 'string', required: true, enum: ['variation_of', 'remix_of'], description: 'Auto-decided: variation_of when only seed/params changed, remix_of when the prompt changed.' },
+        },
+      },
+      render: (_args, value) => {
+        const v = value as { elements: Array<{ filePath: string; kind: string }>; linked_to: string; relation: string }
+        const list = v.elements.map(e => `  ${e.filePath} [${e.kind}]`).join('\n')
+        return [{
+          type: 'text',
+          text: `Rerolled ${v.elements.length} variant(s) from ${v.linked_to} →[${v.relation}]:\n${list}`,
+        }]
+      },
+    },
+    async execute(args: {
+      source_element: string
+      patch?: unknown
+      count?: number
+      provider_id?: string
+    }, exec) {
+      exec.signal.throwIfAborted()
+      const sessionId = sessionIdOf(exec)
+      const cwd = resolveCwd(sessionId)
+      // 1. Resolve the source element + its originalRequest.
+      await canvas.ensureHydrated(sessionId)
+      const sourceEl = canvas.getElementByPath(sessionId, args.source_element)
+      const originalRequest = sourceEl.meta?.originalRequest as RequestSnapshot | undefined
+      if (originalRequest === undefined) {
+        throw new AigcError(
+          'bad-request',
+          `cannot reroll element "${args.source_element}" — it has no meta.originalRequest. `
+          + 'This happens when the element was not placed via aigc_canvas_place from a file produced by aigc_http_request '
+          + '(e.g. it was uploaded via drag-drop or created by aigc_media_edit). Re-generate it via aigc_http_request + '
+          + 'aigc_canvas_place first to enable reroll.',
+        )
+      }
+      // 2. Validate + parse the patch.
+      const patch = coerceMeta(args.patch) ?? {}
+      const count = args.count !== undefined ? Math.max(1, Math.min(8, Math.floor(args.count))) : 1
+      // 3. Decide the relation: remix_of when prompt changed, variation_of otherwise.
+      const promptChanged = patch.prompt_delta !== undefined || patch.prompt_replace !== undefined
+      const relation: EdgeRelation = promptChanged ? 'remix_of' : 'variation_of'
+      // 4. Build the patched body.
+      const provider = getProvider(args.provider_id ?? originalRequest.providerId)
+      const patchedBody = applyRerollPatch(originalRequest.body, patch)
+      const bodyString = typeof patchedBody === 'string'
+        ? patchedBody
+        : (patchedBody !== undefined ? JSON.stringify(patchedBody) : undefined)
+      // 5. Compute grid positions for the variants (to the right of the source).
+      const positions = gridPositionsRightOf(sourceEl.x, sourceEl.y, count)
+      // 6. Execute the request count times, save each, place each, record snapshot.
+      const newElements: AigcElement[] = []
+      for (let i = 0; i < count; i++) {
+        exec.signal.throwIfAborted()
+        // For count > 1, randomize the seed on every iteration (if body has seed) so variants differ.
+        const iterBody = (count > 1 && typeof patchedBody === 'object' && patchedBody !== null)
+          ? randomizeSeedInPlace({ ...(patchedBody as Record<string, unknown>) })
+          : patchedBody
+        const iterBodyString = typeof iterBody === 'string'
+          ? iterBody
+          : (iterBody !== undefined ? JSON.stringify(iterBody) : undefined)
+        const requestStartedAt = Date.now()
+        const result = await executeProviderRequest(provider, {
+          method: originalRequest.method,
+          path: originalRequest.path,
+          headers: originalRequest.headers,
+          query: originalRequest.query,
+          body: iterBodyString,
+        }, { timeoutMs: getTimeoutMs(), signal: exec.signal })
+        const durationMs = Date.now() - requestStartedAt
+        if (!result.ok) {
+          throw new AigcError(
+            'backend-error',
+            `reroll failed: provider returned HTTP ${result.status} (${result.contentType}): ${result.text.slice(0, 500)}`,
+            result.status >= 400 && result.status < 500 ? 400 : 502,
+          )
+        }
+        // Save the response to disk + record snapshot for the new file.
+        const saved = await saveRerollResponse(result, sessionId, cwd, provider.id, originalRequest, iterBody, durationMs)
+        // Place the file on the canvas at the computed grid position.
+        const placed = await canvas.placeFile(sessionId, {
+          kind: saved.kind,
+          filePath: saved.filePath,
+          title: `${sourceEl.title} (reroll ${i + 1})`,
+          producedBy: 'aigc_reroll',
+          x: positions[i]!.x,
+          y: positions[i]!.y,
+          description: sourceEl.description ?? sourceEl.title.slice(0, 40),
+          ...(sourceEl.promptText !== undefined ? { promptText: sourceEl.promptText } : {}),
+          meta: { originalRequest: saved.snapshot },
+        }, cwd)
+        newElements.push(placed)
+      }
+      // 7. Wire edges: source → each new element with the relation.
+      if (newElements.length > 0) {
+        await canvas.wireEdges(
+          sessionId,
+          newElements.map(e => ({ uuid: sourceEl.uuid, relation })),
+          newElements[0]!.uuid,
+        )
+        // Wire source → each subsequent new element too.
+        for (let i = 1; i < newElements.length; i++) {
+          await canvas.wireEdges(
+            sessionId,
+            [{ uuid: sourceEl.uuid, relation }],
+            newElements[i]!.uuid,
+          )
+        }
+        // 8. When count > 1, wire all variants to each other with alternative_of.
+        if (newElements.length > 1) {
+          for (let i = 0; i < newElements.length; i++) {
+            for (let j = 0; j < newElements.length; j++) {
+              if (i === j) continue
+              await canvas.wireEdges(
+                sessionId,
+                [{ uuid: newElements[i]!.uuid, relation: 'alternative_of' }],
+                newElements[j]!.uuid,
+              )
+            }
+          }
+        }
+      }
+      return {
+        elements: newElements.map(e => ({
+          filePath: e.filePath,
+          kind: e.kind,
+          title: e.title,
+          x: e.x,
+          y: e.y,
+        })),
+        linked_to: args.source_element,
+        relation,
+      }
     },
   }))
 
@@ -1260,6 +1467,217 @@ async function saveResponseToSession(content: Buffer | string, ext: string, sess
   await writeFile(filePath, content)
   return filePath
 }
+
+// ── aigc_reroll helpers ──────────────────────────────────────────────────────
+
+/** Common field names that hold a prompt/text in AIGC request bodies. */
+const PROMPT_FIELD_CANDIDATES = ['prompt', 'text', 'input'] as const
+
+/**
+ * Find the prompt field name in one AIGC request body. Returns the first
+ * of `prompt` / `text` / `input` that the body has, or undefined when the
+ * body doesn't look like a typical AIGC request (e.g. chat completions
+ * use `messages[0].content` — reroll of chat is not supported).
+ */
+function findPromptField(body: Record<string, unknown> | undefined): string | undefined {
+  if (body === undefined) return undefined
+  for (const key of PROMPT_FIELD_CANDIDATES) {
+    if (typeof body[key] === 'string') return key
+  }
+  return undefined
+}
+
+/**
+ * Apply a reroll patch to the original request body. Returns the patched
+ * body (a structured object when the original was an object; a raw string
+ * when the original was a string; undefined when no body).
+ *
+ * Patch fields:
+ *  - seed?: number — overrides body.seed (or adds one if missing)
+ *  - prompt_replace?: string — replaces the prompt field entirely
+ *  - prompt_delta?: string — appends to the prompt field
+ *  - size?: string — overrides body.size
+ *  - Any other field overrides the corresponding body field directly
+ *
+ * When `seed` is NOT in the patch AND the body has a seed field, the seed
+ * is randomized (so a reroll with no patch yields a different result).
+ */
+function applyRerollPatch(originalBody: unknown, patch: Record<string, unknown>): unknown {
+  if (originalBody === undefined) {
+    // GET-style request with no body — nothing to patch.
+    return undefined
+  }
+  if (typeof originalBody === 'string') {
+    // Raw body string — try to parse as JSON, patch, re-stringify.
+    // If it can't be parsed, return as-is (the reroll will replay it verbatim).
+    try {
+      const parsed = JSON.parse(originalBody)
+      const patched = applyPatchToObject(parsed, patch)
+      return patched
+    } catch {
+      return originalBody
+    }
+  }
+  if (isPlainObject(originalBody)) {
+    return applyPatchToObject(originalBody, patch)
+  }
+  // Arrays / primitives — not patchable, return as-is.
+  return originalBody
+}
+
+/** Apply the patch to a parsed JSON object body. */
+function applyPatchToObject(body: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...body }
+  const promptField = findPromptField(result)
+  // 1. Prompt replace (highest priority — wins over delta).
+  if (typeof patch.prompt_replace === 'string' && promptField !== undefined) {
+    result[promptField] = patch.prompt_replace
+  } else if (typeof patch.prompt_delta === 'string' && promptField !== undefined) {
+    // 2. Prompt delta: append to the existing prompt.
+    const existing = typeof result[promptField] === 'string' ? (result[promptField] as string) : ''
+    result[promptField] = existing + patch.prompt_delta
+  }
+  // 3. Seed: explicit override, or randomize when body already has a seed field.
+  if (typeof patch.seed === 'number') {
+    result.seed = patch.seed
+  } else if ('seed' in result) {
+    result.seed = Math.floor(Math.random() * 1_000_000_000)
+  }
+  // 4. Size override.
+  if (typeof patch.size === 'string') {
+    result.size = patch.size
+  }
+  // 5. Any other patch field overrides the body field directly.
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === 'seed' || key === 'prompt_replace' || key === 'prompt_delta' || key === 'size') continue
+    result[key] = value
+  }
+  return result
+}
+
+/**
+ * Randomize the `seed` field of a body object in place. Returns the same
+ * object. No-op when the body has no `seed` field (some APIs don't accept
+ * a seed and would error if we added one).
+ */
+function randomizeSeedInPlace(body: Record<string, unknown>): Record<string, unknown> {
+  if ('seed' in body) {
+    body.seed = Math.floor(Math.random() * 1_000_000_000)
+  }
+  return body
+}
+
+/**
+ * Compute grid positions for `count` new elements placed to the right of
+ * a source element. count=1 → single spot at the source's right-center;
+ * count>1 → a 2-column grid (or N×1 for small N) vertically centered on
+ * the source.
+ *
+ * Uses the same NODE_W_REF (240) + gap (20) layout as the canvas auto-placement.
+ */
+function gridPositionsRightOf(srcX: number, srcY: number, count: number): Array<{ x: number; y: number }> {
+  const NODE_W = 240
+  const NODE_H = 110
+  const GAP_X = 20
+  const GAP_Y = 16
+  const startX = srcX + NODE_W + GAP_X
+  const centerY = srcY + NODE_H / 2
+  if (count === 1) {
+    return [{ x: startX, y: srcY }]
+  }
+  // For count > 1: arrange in a grid with up to 2 columns.
+  const cols = count <= 2 ? count : 2
+  const rows = Math.ceil(count / cols)
+  const totalH = rows * NODE_H + (rows - 1) * GAP_Y
+  const topY = centerY - totalH / 2
+  const positions: Array<{ x: number; y: number }> = []
+  for (let i = 0; i < count; i++) {
+    const col = i % cols
+    const row = Math.floor(i / cols)
+    positions.push({
+      x: startX + col * (NODE_W + GAP_X),
+      y: topY + row * (NODE_H + GAP_Y),
+    })
+  }
+  return positions
+}
+
+/**
+ * Save one reroll provider response to disk + build the RequestSnapshot
+ * for the new file (so the reroll can itself be re-rerolled). Mirrors the
+ * save + snapshot logic of aigc_http_request but operates on the reroll's
+ * already-built request (no $base64 expansion — the patched body is sent
+ * as-is, placeholders were resolved during the original request and are
+ * preserved in originalRequest.body).
+ */
+async function saveRerollResponse(
+  result: Exclude<Awaited<ReturnType<typeof executeProviderRequest>>, { ok: false }>,
+  sessionId: string,
+  cwd: string,
+  providerId: string,
+  originalRequest: RequestSnapshot,
+  patchedBody: unknown,
+  durationMs: number,
+): Promise<{ filePath: string; kind: AigcElement['kind']; snapshot: RequestSnapshot }> {
+  // Build the snapshot that will become the new element's meta.originalRequest.
+  // The body stored is the PATCHED body (so re-reroll starts from the patched
+  // state, not the original — matches user expectation of "reroll this variant").
+  const buildSnapshot = (filePath: string, size: number | undefined, kind: string): RequestSnapshot => ({
+    providerId,
+    method: originalRequest.method,
+    path: originalRequest.path,
+    ...(originalRequest.query !== undefined ? { query: originalRequest.query } : {}),
+    ...(originalRequest.headers !== undefined ? { headers: originalRequest.headers } : {}),
+    ...(patchedBody !== undefined ? { body: patchedBody } : {}),
+    responseInfo: {
+      status: result.status,
+      contentType: result.contentType,
+      kind,
+      ...(size !== undefined ? { size } : {}),
+      durationMs,
+    },
+  })
+  switch (result.kind) {
+    case 'json':
+    case 'text': {
+      // OpenAI image b64 extraction.
+      if (result.kind === 'json') {
+        const extracted = extractOpenAIB64Image(result.text)
+        if (extracted !== null) {
+          if (extracted.bytes.byteLength > getMediaLimitSafe()) {
+            throw new AigcError('backend-error', `reroll extracted image too large (${extracted.bytes.byteLength} bytes > ${getMediaLimitSafe()} limit)`, 413)
+          }
+          const filePath = await saveResponseToSession(extracted.bytes, extracted.ext, sessionId, cwd)
+          return { filePath, kind: 'image', snapshot: buildSnapshot(filePath, extracted.bytes.byteLength, 'image') }
+        }
+      }
+      // Oversized text → save to file. (Reroll of text responses is unusual but supported.)
+      const filePath = await saveResponseToSession(result.text, result.kind === 'json' ? 'json' : 'txt', sessionId, cwd)
+      const size = Buffer.byteLength(result.text)
+      return { filePath, kind: 'prompt', snapshot: buildSnapshot(filePath, size, result.kind) }
+    }
+    default: {
+      // Binary (image / video / audio / other).
+      const ext = extensionForBinaryKind(result.kind, result.contentType)
+      if (result.size > getMediaLimitSafe()) {
+        throw new AigcError('backend-error', `reroll response too large (${result.size} bytes > ${getMediaLimitSafe()} limit)`, 413)
+      }
+      const filePath = await saveResponseToSession(result.bytes, ext, sessionId, cwd)
+      const kind: AigcElement['kind'] = result.kind === 'other' ? 'prompt' : result.kind
+      return { filePath, kind, snapshot: buildSnapshot(filePath, result.size, result.kind) }
+    }
+  }
+}
+
+/**
+ * Get the media size limit. Wraps the closure passed to registerTools so
+ * helpers outside the registerTools scope can access it.
+ *
+ * This is a module-level reference that registerTools sets on entry; the
+ * helpers (saveRerollResponse) read it through this getter.
+ */
+let _getMediaLimit: () => number = () => 100 * 1024 * 1024
+function getMediaLimitSafe(): number { return _getMediaLimit() }
 
 /** Re-export the projection helpers for the unit tests. */
 export { elementProjection, edgeProjection, titleOf }

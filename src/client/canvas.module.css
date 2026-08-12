@@ -275,6 +275,37 @@
   overflow: hidden;
 }
 
+/* Lifecycle status visual differences (per docs/product/01-agent-autonomy.md §5).
+ * draft: semi-transparent + loading animation
+ * rejected: greyed 50% + strikethrough title
+ * archived: greyed 30% (default hidden, shown only when filter is on)
+ */
+.nodeStatus_draft {
+  opacity: 0.6;
+}
+
+.nodeStatus_rejected {
+  opacity: 0.5;
+  filter: grayscale(0.7);
+}
+
+.nodeStatus_rejected .nodeTitle {
+  text-decoration: line-through;
+}
+
+.nodeStatus_archived {
+  opacity: 0.3;
+  filter: grayscale(0.8);
+}
+
+/* Winner badge (gold star, shown when element.winner === true). */
+.winnerBadge {
+  margin-left: 4px;
+  color: #ffc107;
+  font-size: 14px;
+  line-height: 1;
+}
+
 .nodeHeader {
   display: flex;
   align-items: center;

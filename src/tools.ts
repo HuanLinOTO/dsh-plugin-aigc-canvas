@@ -50,8 +50,8 @@ import type { ContentBlock, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-tools'
 import type { Context } from './context-types.js'
 import type { ResolvedAigcProvider } from './config.js'
-import type { AigcElement, AigcCanvasService, EdgeRelation } from './canvas-registry.js'
-import { canvasDirFor, EDGE_RELATIONS, DEFAULT_EDGE_RELATION, coerceEdgeRelation } from './canvas-registry.js'
+import type { AigcElement, AigcCanvasService, EdgeRelation, ElementStatus } from './canvas-registry.js'
+import { canvasDirFor, EDGE_RELATIONS, DEFAULT_EDGE_RELATION, coerceEdgeRelation, ELEMENT_STATUSES, DEFAULT_ELEMENT_STATUS, coerceElementStatus } from './canvas-registry.js'
 import { executeProviderRequest, INLINE_TEXT_CAP, type ProviderBinaryKind } from './provider-http.js'
 import { executeMediaEdit, MEDIA_EDIT_OPERATIONS, type MediaEditOperation } from './media-edit.js'
 import { AigcError } from './wire.js'
@@ -115,6 +115,8 @@ function elementProjection(el: AigcElement): Record<string, unknown> {
     y: el.y,
     createdAt: el.createdAt,
     producedBy: el.producedBy,
+    status: el.status,
+    ...(el.winner !== undefined ? { winner: el.winner } : {}),
     ...(el.promptText !== undefined ? { promptText: el.promptText } : {}),
     ...(el.mediaSize !== undefined ? { mediaSize: el.mediaSize } : {}),
     ...(el.meta !== undefined ? { meta: el.meta } : {}),
@@ -1432,6 +1434,12 @@ export function registerTools(
           + 'Drop articles and filler — "sleeping cat" not "a cat that is sleeping".',
       },
       kind: { type: 'string', enum: ['image', 'video', 'audio', 'prompt'], description: 'Element kind. Inferred from the file extension when omitted.' },
+      status: {
+        type: 'string',
+        enum: ELEMENT_STATUSES as readonly string[],
+        description: `Lifecycle status (default "${DEFAULT_ELEMENT_STATUS}"). Use 'draft' for pipeline steps that are still generating, 'rejected' for否决 samples, 'archived' for superseded versions.`,
+      },
+      winner: { type: 'boolean', description: 'Whether to mark this element as the winner of a variation cluster (shows a winner badge).' },
       prompt: { type: 'string', description: 'The prompt text used to generate this file (shown on double-click).' },
       meta: { type: 'json', description: 'Generation parameters / metadata as a JSON OBJECT (e.g. {"size":"768x768","seed":42}). Shown on double-click. Do NOT pass a stringified JSON.' },
       references: {
@@ -1468,6 +1476,8 @@ export function registerTools(
       title?: string
       description: string
       kind?: string
+      status?: string
+      winner?: boolean
       prompt?: string
       meta?: unknown
       references?: unknown
@@ -1543,6 +1553,13 @@ export function registerTools(
         ...(meta !== undefined ? { meta } : {}),
         ...(refInputs !== undefined ? { referenceUuids: refInputs.map(r => r.uuid) } : {}),
       }, cwd)
+      // Apply explicit status / winner overrides after placement (placeFile
+      // defaults to 'ready' — the model can override to 'draft' for pipeline
+      // steps or 'rejected' for negative samples).
+      if ((args.status !== undefined && args.status !== DEFAULT_ELEMENT_STATUS) || args.winner !== undefined) {
+        const status = args.status !== undefined ? coerceElementStatus(args.status) : DEFAULT_ELEMENT_STATUS
+        await canvas.setStatus(sessionId, el.uuid, status, args.winner)
+      }
       let linked = 0
       if (refInputs !== undefined && refInputs.length > 0) {
         // Filter out self-references (can't happen after placeFile, but
@@ -1657,19 +1674,80 @@ export function registerTools(
     },
   }))
 
+  // ══ aigc_canvas_set_status ══════════════════════════════════════════════
+  register(defineTool({
+    name: 'aigc_canvas_set_status',
+    description:
+      'Update one element\'s lifecycle status (draft/ready/rejected/archived) and optional winner flag. '
+      + 'Use this to: mark a variant as the winner of a cluster (status=ready + winner=true), reject a bad '
+      + 'generation (status=rejected — kept as a negative sample but greyed out), or archive a superseded '
+      + 'version (status=archived — hidden from the default list_elements view). '
+      + 'aigc_canvas_list_elements defaults to only showing `ready` elements — pass include_statuses to see others.',
+    parameters: {
+      element_path: { type: 'string', required: true, description: 'filePath of the element to update.' },
+      status: {
+        type: 'string',
+        required: true,
+        enum: ELEMENT_STATUSES as readonly string[],
+        description: 'New lifecycle status: draft (generating) / ready (default, visible) / rejected (否决, greyed out) / archived (superseded, hidden by default).',
+      },
+      winner: { type: 'boolean', description: 'Whether to mark this element as the winner of a variation cluster.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          element_path: { type: 'string', required: true },
+          status: { type: 'string', required: true, enum: ELEMENT_STATUSES as readonly string[] },
+          winner: { type: 'boolean' },
+        },
+      },
+      render: textRender((v: { element_path: string; status: string; winner?: boolean }) =>
+        `Set element "${v.element_path}" status=${v.status}${v.winner === true ? ' + winner' : ''}.`,
+      ),
+    },
+    async execute(args: { element_path: string; status: string; winner?: boolean }, exec) {
+      exec.signal.throwIfAborted()
+      if (typeof args.status !== 'string' || !(ELEMENT_STATUSES as readonly string[]).includes(args.status)) {
+        throw new AigcError('bad-request', `status must be one of: ${(ELEMENT_STATUSES as readonly string[]).join(', ')}`)
+      }
+      const sessionId = sessionIdOf(exec)
+      await canvas.ensureHydrated(sessionId)
+      const el = canvas.getElementByPath(sessionId, args.element_path)
+      const status = args.status as ElementStatus
+      await canvas.setStatus(sessionId, el.uuid, status, args.winner)
+      return {
+        ok: true,
+        element_path: args.element_path,
+        status,
+        ...(args.winner !== undefined ? { winner: args.winner } : {}),
+      }
+    },
+  }))
+
   // ══ aigc_canvas_list_elements ════════════════════════════════════════════
   register(defineTool({
     name: 'aigc_canvas_list_elements',
     description:
       'List every element and edge currently on the canvas for the calling agent\'s session. '
       + 'Returns each element\'s filePath (the primary identifier), kind (prompt/image/video/audio), title, canvas '
-      + 'position (x, y), producing tool, and metadata; and every edge with its semantic `relation` '
+      + 'position (x, y), producing tool, lifecycle status, and metadata; and every edge with its semantic `relation` '
       + '(source filePath →[relation]→ target filePath). '
+      + 'By default only `ready` elements are returned (to keep your context clean) — pass `include_statuses` to see '
+      + 'draft/rejected/archived elements too (e.g. when recovering a failed pipeline step or reviewing rejected variants). '
       + 'Use this to recover state after a long sequence of tool calls, to find a filePath to pass as a reference, '
       + 'to choose a free spot on the canvas, or to reason about how existing elements depend on each other '
       + '(e.g. "video B was generated from prompt A as first_frame + prompt C as last_frame — if B\'s opening is '
       + 'bad I can reroll just A").',
-    parameters: {},
+    parameters: {
+      include_statuses: {
+        type: 'array',
+        items: { type: 'string', enum: ELEMENT_STATUSES as readonly string[] },
+        description: `Lifecycle statuses to include (default: ["ready"]). Pass e.g. ["ready","rejected","archived"] to see all elements. Values: ${(ELEMENT_STATUSES as readonly string[]).join(' | ')}.`,
+      },
+    },
     output: {
       schema: {
         type: 'object',
@@ -1689,6 +1767,8 @@ export function registerTools(
                 y: { type: 'number', required: true },
                 createdAt: { type: 'integer', required: true },
                 producedBy: { type: 'string', required: true },
+                status: { type: 'string', required: true, enum: ELEMENT_STATUSES as readonly string[] },
+                winner: { type: 'boolean' },
                 promptText: { type: 'string' },
                 mediaSize: { type: 'integer' },
                 meta: { type: 'json' },
@@ -1712,19 +1792,28 @@ export function registerTools(
         },
       },
       render: (_args, value) => {
-        const v = value as { elements: Array<{ filePath: string; kind: string; title: string; x: number; y: number }>; edges: Array<{ source: string; target: string; relation: string }> }
+        const v = value as { elements: Array<{ filePath: string; kind: string; title: string; x: number; y: number; status: string; winner?: boolean }>; edges: Array<{ source: string; target: string; relation: string }> }
         if (v.elements.length === 0) return [{ type: 'text', text: 'Canvas is empty for this session.' }]
-        const lines = v.elements.map((el) => `  ${el.filePath}  [${el.kind}]  @(${el.x}, ${el.y})  "${el.title}"`)
+        const lines = v.elements.map((el) => `  ${el.filePath}  [${el.kind}/${el.status}${el.winner === true ? '/winner' : ''}]  @(${el.x}, ${el.y})  "${el.title}"`)
         return [{
           type: 'text',
           text: `Canvas (${v.elements.length} elements, ${v.edges.length} edges):\n${lines.join('\n')}\nEdges:\n${v.edges.map(e => `  ${e.source} →[${e.relation}]→ ${e.target}`).join('\n')}`,
         }]
       },
     },
-    execute: async (_args, exec) => {
+    execute: async (args: { include_statuses?: unknown }, exec) => {
       const sessionId = sessionIdOf(exec)
       await canvas.ensureHydrated(sessionId)
-      const state = canvas.snapshot(sessionId)
+      // Coerce include_statuses into ElementStatus[] (default: only 'ready').
+      let includeStatuses: ElementStatus[] | undefined
+      if (args.include_statuses !== undefined) {
+        if (Array.isArray(args.include_statuses)) {
+          includeStatuses = args.include_statuses.map(s => coerceElementStatus(s))
+        } else {
+          throw new AigcError('bad-request', 'include_statuses must be an array of status strings')
+        }
+      }
+      const state = canvas.snapshot(sessionId, includeStatuses)
       const lookup = (uuid: string): AigcElement => canvas.getElement(sessionId, uuid)
       return Promise.resolve({
         elements: state.elements.map(elementProjection),

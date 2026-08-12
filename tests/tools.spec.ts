@@ -240,11 +240,12 @@ describe('registerTools (stub provider)', () => {
     await rm(cwd, { recursive: true, force: true })
   })
 
-  it('registers exactly thirteen tools', () => {
+  it('registers exactly fourteen tools', () => {
     expect(Array.from(ctx.registered.keys()).sort()).toEqual([
       'aigc_canvas_link',
       'aigc_canvas_list_elements',
       'aigc_canvas_place',
+      'aigc_canvas_set_status',
       'aigc_canvas_unlink',
       'aigc_get_endpoint_details',
       'aigc_get_provider_info',
@@ -991,6 +992,62 @@ describe('registerTools (stub provider)', () => {
     expect(s2.elements).toHaveLength(0)
   })
 
+  it('aigc_canvas_set_status updates the lifecycle status + winner', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const img = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"p"}' }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    const placed = await placeTool.execute({ description: 'test', file_path: img.file_path, x: 0, y: 0 }, execFor('s1')) as { element_path: string }
+    const setStatusTool = ctx.registered.get('aigc_canvas_set_status')!
+    const result = await setStatusTool.execute({ element_path: placed.element_path, status: 'rejected', winner: false }, execFor('s1')) as { ok: boolean; status: string; winner?: boolean }
+    expect(result.ok).toBe(true)
+    expect(result.status).toBe('rejected')
+    expect(result.winner).toBe(false)
+    // Verify the element is now filtered out of the default list_elements view.
+    const listTool = ctx.registered.get('aigc_canvas_list_elements')!
+    const defaultList = await listTool.execute({}, execFor('s1')) as { elements: unknown[] }
+    expect(defaultList.elements).toHaveLength(0)
+    // But visible with include_statuses.
+    const withRejected = await listTool.execute({ include_statuses: ['ready', 'rejected'] }, execFor('s1')) as { elements: Array<{ status: string; winner?: boolean }> }
+    expect(withRejected.elements).toHaveLength(1)
+    expect(withRejected.elements[0]!.status).toBe('rejected')
+    expect(withRejected.elements[0]!.winner).toBe(false)
+  })
+
+  it('aigc_canvas_set_status marks winner', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const img = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"p"}' }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    const placed = await placeTool.execute({ description: 'test', file_path: img.file_path, x: 0, y: 0 }, execFor('s1')) as { element_path: string }
+    const setStatusTool = ctx.registered.get('aigc_canvas_set_status')!
+    await setStatusTool.execute({ element_path: placed.element_path, status: 'ready', winner: true }, execFor('s1'))
+    const listTool = ctx.registered.get('aigc_canvas_list_elements')!
+    const listed = await listTool.execute({}, execFor('s1')) as { elements: Array<{ winner?: boolean }> }
+    expect(listed.elements[0]!.winner).toBe(true)
+  })
+
+  it('aigc_canvas_set_status rejects invalid status enum', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const img = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"p"}' }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    const placed = await placeTool.execute({ description: 'test', file_path: img.file_path, x: 0, y: 0 }, execFor('s1')) as { element_path: string }
+    const setStatusTool = ctx.registered.get('aigc_canvas_set_status')!
+    await expect(setStatusTool.execute({ element_path: placed.element_path, status: 'bogus' }, execFor('s1'))).rejects.toThrow()
+  })
+
+  it('aigc_canvas_place accepts an explicit status override', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const img = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"p"}' }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    await placeTool.execute({ description: 'test', file_path: img.file_path, x: 0, y: 0, status: 'draft' }, execFor('s1'))
+    const listTool = ctx.registered.get('aigc_canvas_list_elements')!
+    // draft is not in the default filter — element should be hidden.
+    const defaultList = await listTool.execute({}, execFor('s1')) as { elements: unknown[] }
+    expect(defaultList.elements).toHaveLength(0)
+    const withDraft = await listTool.execute({ include_statuses: ['draft'] }, execFor('s1')) as { elements: Array<{ status: string }> }
+    expect(withDraft.elements).toHaveLength(1)
+    expect(withDraft.elements[0]!.status).toBe('draft')
+  })
+
   it('tools honor exec.signal.aborted', async () => {
     const ac = new AbortController()
     ac.abort()
@@ -1076,8 +1133,8 @@ describe('registerTools (stub provider)', () => {
     }
   })
 
-  it('dispose unregisters all thirteen tools', () => {
-    expect(ctx.registered.size).toBe(13)
+  it('dispose unregisters all fourteen tools', () => {
+    expect(ctx.registered.size).toBe(14)
     dispose()
     expect(ctx.registered.size).toBe(0)
   })

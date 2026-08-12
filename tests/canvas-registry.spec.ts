@@ -337,6 +337,73 @@ describe('AigcCanvasService', () => {
     expect(snap.edges[0]!.relation).toBe('input')
   })
 
+  it('hydrates legacy elements by defaulting missing status to "ready"', async () => {
+    // Old canvas.json files predate the `status` field — elements must be
+    // normalized to status='ready' on hydrate.
+    const dir = canvasDirFor(cwd, 's1')
+    await mkdir(dir, { recursive: true })
+    await writeFile(canvasJsonPath(cwd, 's1'), JSON.stringify({
+      sessionId: 's1',
+      elements: [
+        { uuid: 'a', sessionId: 's1', kind: 'image', title: 'a', x: 0, y: 0, createdAt: 1, producedBy: 'old', filePath: join(dir, 'a.png') },
+      ],
+      edges: [],
+    }))
+    await service.ensureHydrated('s1')
+    const el = service.getElement('s1', 'a')
+    expect(el.status).toBe('ready')
+  })
+
+  it('setStatus updates the element status + winner flag', async () => {
+    const el = await service.addMedia('s1', { kind: 'image', title: 'm', producedBy: 'tool', mediaBytes: Buffer.from([1]) }, cwd)
+    expect(el.status).toBe('ready')
+    await service.setStatus('s1', el.uuid, 'rejected')
+    expect(service.getElement('s1', el.uuid).status).toBe('rejected')
+    await service.setStatus('s1', el.uuid, 'ready', true)
+    const updated = service.getElement('s1', el.uuid)
+    expect(updated.status).toBe('ready')
+    expect(updated.winner).toBe(true)
+  })
+
+  it('setStatus throws for unknown uuids', async () => {
+    await expect(service.setStatus('s1', 'nope', 'ready')).rejects.toThrow(AigcError)
+  })
+
+  it('snapshot filters by status (default: only ready)', async () => {
+    const a = await service.addMedia('s1', { kind: 'image', title: 'a', producedBy: 'tool', mediaBytes: Buffer.from([1]) }, cwd)
+    const b = await service.addMedia('s1', { kind: 'image', title: 'b', producedBy: 'tool', mediaBytes: Buffer.from([2]) }, cwd)
+    const c = await service.addMedia('s1', { kind: 'image', title: 'c', producedBy: 'tool', mediaBytes: Buffer.from([3]) }, cwd)
+    await service.setStatus('s1', b.uuid, 'rejected')
+    await service.setStatus('s1', c.uuid, 'archived')
+    // Default: only ready.
+    const readySnap = service.snapshot('s1')
+    expect(readySnap.elements).toHaveLength(1)
+    expect(readySnap.elements[0]!.uuid).toBe(a.uuid)
+    // Include rejected + archived.
+    const allSnap = service.snapshot('s1', ['ready', 'rejected', 'archived'])
+    expect(allSnap.elements).toHaveLength(3)
+    // Just rejected.
+    const rejectedSnap = service.snapshot('s1', ['rejected'])
+    expect(rejectedSnap.elements).toHaveLength(1)
+    expect(rejectedSnap.elements[0]!.uuid).toBe(b.uuid)
+  })
+
+  it('snapshot filters edges to only those whose source+target are both in the filtered set', async () => {
+    const a = await service.addMedia('s1', { kind: 'image', title: 'a', producedBy: 'tool', mediaBytes: Buffer.from([1]) }, cwd)
+    const b = await service.addMedia('s1', { kind: 'video', title: 'b', producedBy: 'tool', mediaBytes: Buffer.from([2]) }, cwd)
+    const c = await service.addMedia('s1', { kind: 'image', title: 'c', producedBy: 'tool', mediaBytes: Buffer.from([3]) }, cwd)
+    await service.wireEdges('s1', [{ uuid: a.uuid }], b.uuid)
+    await service.wireEdges('s1', [{ uuid: b.uuid }], c.uuid)
+    // Archive b — edges a→b and b→c should be filtered out (b is not in the ready set).
+    await service.setStatus('s1', b.uuid, 'archived')
+    const readySnap = service.snapshot('s1')
+    expect(readySnap.elements).toHaveLength(2) // a + c
+    expect(readySnap.edges).toHaveLength(0) // both edges reference b
+    // Include archived → both edges visible.
+    const allSnap = service.snapshot('s1', ['ready', 'archived'])
+    expect(allSnap.edges).toHaveLength(2)
+  })
+
   it('persists state to canvas.json after every mutation', async () => {
     const el = await service.addPrompt('s1', { title: 'p', promptText: 'p', producedBy: 'tool' }, cwd)
     const path = canvasJsonPath(cwd, 's1')

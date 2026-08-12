@@ -15,6 +15,9 @@ export class AigcApiError extends Error {
 /** Element kind (matches the host enum). */
 export type AigcElementKind = 'prompt' | 'image' | 'video' | 'audio'
 
+/** Element lifecycle status (matches the host ElementStatus). */
+export type ElementStatus = 'draft' | 'ready' | 'rejected' | 'archived'
+
 /**
  * Semantic relation on an edge (matches the host EdgeRelation enum).
  * Drives the canvas line style + label. Optional on the client side for
@@ -53,6 +56,10 @@ export interface AigcElement {
   mediaSize?: number
   meta?: Record<string, unknown>
   description?: string
+  /** Lifecycle status: draft / ready (default) / rejected / archived. */
+  status?: ElementStatus
+  /** Whether this element was marked as the winner of a variation cluster. */
+  winner?: boolean
 }
 
 /** One canvas edge (source filePath → target filePath, with semantic relation). */

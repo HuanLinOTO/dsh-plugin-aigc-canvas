@@ -31,6 +31,29 @@ import { AigcError } from './wire.js'
 export type AigcElementKind = 'prompt' | 'image' | 'video' | 'audio'
 
 /**
+ * Element lifecycle status. Drives default visibility in list_elements
+ * (only `ready` by default) and client rendering (greyed out for
+ * rejected/archived).
+ *
+ * Per docs/product/01-agent-autonomy.md §5.
+ */
+export type ElementStatus = 'draft' | 'ready' | 'rejected' | 'archived'
+
+/** All ElementStatus values as a readonly array (for schema enum + validation). */
+export const ELEMENT_STATUSES: readonly ElementStatus[] = ['draft', 'ready', 'rejected', 'archived'] as const
+
+/** Default status when not specified (also used for legacy data hydration). */
+export const DEFAULT_ELEMENT_STATUS: ElementStatus = 'ready'
+
+/** Coerce an unknown value to ElementStatus, falling back to the default. */
+export function coerceElementStatus(value: unknown): ElementStatus {
+  if (typeof value === 'string' && (ELEMENT_STATUSES as readonly string[]).includes(value)) {
+    return value as ElementStatus
+  }
+  return DEFAULT_ELEMENT_STATUS
+}
+
+/**
  * Semantic relation on an edge: WHY one element was wired to another.
  *
  * The 11 fixed enum values cover the common AIGC pipeline relationships
@@ -140,6 +163,18 @@ export interface AigcElement {
    * title and injected into context when the element is referenced.
    */
   description?: string
+  /**
+   * Lifecycle status: draft (generating) / ready (default) / rejected
+   * (否决 — kept as a negative sample) / archived (被新版本取代).
+   * See ElementStatus + docs/product/01-agent-autonomy.md §5.
+   */
+  status: ElementStatus
+  /**
+   * Whether this element was marked as the winner of a variation cluster
+   * (the user picked it as the best of N variants). Drives a winner
+   * badge on the canvas card.
+   */
+  winner?: boolean
 }
 
 /** One edge: source element → target element (multi-to-one fan-in). */
@@ -242,6 +277,11 @@ export interface AigcCanvasService {
    * update, not a no-op.
    */
   wireEdges(sessionId: string, inputs: readonly { uuid: string; relation?: EdgeRelation; note?: string }[], targetUuid: string): Promise<void>
+  /**
+   * Update one element's lifecycle status (draft/ready/rejected/archived)
+   * and optional winner flag. Per docs/product/01-agent-autonomy.md §5.
+   */
+  setStatus(sessionId: string, uuid: string, status: ElementStatus, winner?: boolean): Promise<AigcElement>
   /** Remove one edge (source → target). Idempotent. */
   unlink(sessionId: string, sourceUuid: string, targetUuid: string): Promise<void>
   /** Load the persisted state for one session (idempotent; used before sync reads). */
@@ -250,8 +290,11 @@ export interface AigcCanvasService {
   getElement(sessionId: string, uuid: string): AigcElement
   /** Look up one element by its filePath (throws if not found). */
   getElementByPath(sessionId: string, filePath: string): AigcElement
-  /** Snapshot of one session's full canvas state (elements + edges). */
-  snapshot(sessionId: string): AigcCanvasState
+  /**
+   * Snapshot of one session's full canvas state, optionally filtered by
+   * status (only `ready` by default — keeps the agent's context clean).
+   */
+  snapshot(sessionId: string, includeStatuses?: readonly ElementStatus[]): AigcCanvasState
   /** Subscribe to canvas mutations for any session. Returns disposer. */
   subscribe(listener: AigcCanvasListener): () => void
   /** Subscribe to canvas mutations for one specific session. */
@@ -500,6 +543,8 @@ export function createAigcCanvasService(
           // Old persisted data predates positions: normalize missing x/y to 0.
           if (typeof el.x !== 'number') el.x = 0
           if (typeof el.y !== 'number') el.y = 0
+          // Old persisted data predates the status field: normalize to 'ready'.
+          el.status = coerceElementStatus(el.status)
           table.set(el.uuid, el)
         }
       }
@@ -553,6 +598,7 @@ export function createAigcCanvasService(
       producedBy: params.producedBy,
       filePath,
       promptText: params.promptText,
+      status: DEFAULT_ELEMENT_STATUS,
       ...(params.meta !== undefined ? { meta: params.meta } : {}),
       ...(params.description !== undefined && params.description !== '' ? { description: params.description } : {}),
     }
@@ -579,6 +625,7 @@ export function createAigcCanvasService(
       producedBy: params.producedBy,
       filePath,
       mediaSize: params.mediaBytes.byteLength,
+      status: DEFAULT_ELEMENT_STATUS,
       ...(params.meta !== undefined ? { meta: params.meta } : {}),
       ...(params.description !== undefined && params.description !== '' ? { description: params.description } : {}),
     }
@@ -634,6 +681,7 @@ export function createAigcCanvasService(
       producedBy: params.producedBy,
       filePath: resolved,
       mediaSize: params.kind === 'prompt' ? undefined : info.size,
+      status: DEFAULT_ELEMENT_STATUS,
       ...(params.promptText !== undefined ? { promptText: params.promptText } : {}),
       ...(params.meta !== undefined ? { meta: params.meta } : {}),
       ...(params.description !== undefined && params.description !== '' ? { description: params.description } : {}),
@@ -677,6 +725,20 @@ export function createAigcCanvasService(
     }
     await persist(sessionId)
     notify(sessionId)
+  }
+
+  const setStatus: AigcCanvasService['setStatus'] = async (sessionId, uuid, status, winner) => {
+    await hydrate(sessionId)
+    const table = tableOf(sessionId)
+    const el = table.get(uuid)
+    if (el === undefined) {
+      throw new AigcError('not-found', `element "${uuid}" not found in session "${sessionId}"`, 404)
+    }
+    el.status = status
+    if (winner !== undefined) el.winner = winner
+    await persist(sessionId)
+    notify(sessionId)
+    return el
   }
 
   const unlink: AigcCanvasService['unlink'] = async (sessionId, sourceUuid, targetUuid) => {
@@ -738,11 +800,18 @@ export function createAigcCanvasService(
     throw new AigcError('not-found', `element with filePath "${filePath}" not found in session "${sessionId}"`, 404)
   }
 
-  const snapshot: AigcCanvasService['snapshot'] = (sessionId) => ({
-    sessionId,
-    elements: Array.from(tableOf(sessionId).values()),
-    edges: edgesOf(sessionId),
-  })
+  const snapshot: AigcCanvasService['snapshot'] = (sessionId, includeStatuses) => {
+    const table = tableOf(sessionId)
+    // Filter by status when includeStatuses is provided; default to only `ready`.
+    const filter = includeStatuses ?? [DEFAULT_ELEMENT_STATUS]
+    const filterSet = new Set(filter)
+    const elements = Array.from(table.values()).filter(el => filterSet.has(el.status))
+    // Edges: keep all edges whose source AND target are in the filtered set
+    // (so the agent doesn't see dangling edges to filtered-out elements).
+    const elementUuids = new Set(elements.map(e => e.uuid))
+    const edges = edgesOf(sessionId).filter(e => elementUuids.has(e.source) && elementUuids.has(e.target))
+    return { sessionId, elements, edges }
+  }
 
   const subscribe: AigcCanvasService['subscribe'] = (listener) => {
     listeners.add(listener)
@@ -769,6 +838,7 @@ export function createAigcCanvasService(
     updatePosition,
     deleteElement,
     wireEdges,
+    setStatus,
     unlink,
     ensureHydrated: hydrate,
     getElement,

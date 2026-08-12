@@ -91,6 +91,13 @@ export type AigcKey =
   | 'logResponseBody'
   | 'logProducedFile'
   | 'logLocate'
+  // Element lifecycle (per docs/product/01-agent-autonomy.md §5)
+  | 'winner'
+  | 'statusFilter'
+  | 'statusReady'
+  | 'statusDraft'
+  | 'statusRejected'
+  | 'statusArchived'
 
 export const zh: Record<AigcKey, string> = {
   tabTitle: 'AIGC 画布',
@@ -173,6 +180,12 @@ export const zh: Record<AigcKey, string> = {
   logResponseBody: '响应预览',
   logProducedFile: '产物文件',
   logLocate: '在画布上定位',
+  winner: '优胜',
+  statusFilter: '状态',
+  statusReady: '就绪',
+  statusDraft: '草稿',
+  statusRejected: '否决',
+  statusArchived: '归档',
 }
 
 export const en: Record<AigcKey, string> = {
@@ -256,4 +269,10 @@ export const en: Record<AigcKey, string> = {
   logResponseBody: 'Response preview',
   logProducedFile: 'Produced file',
   logLocate: 'Locate on canvas',
+  winner: 'Winner',
+  statusFilter: 'Status',
+  statusReady: 'Ready',
+  statusDraft: 'Draft',
+  statusRejected: 'Rejected',
+  statusArchived: 'Archived',
 }

@@ -130,10 +130,12 @@ export interface CanvasNodeProps {
 /** One canvas node (fixed-width card; height follows content). */
 export function CanvasNode({ element, t }: CanvasNodeProps): ReactNode {
   const kindDotClass = `${css.kindDot} ${css[`kindDot_${element.kind}`] ?? ''}`
+  const statusClass = element.status !== undefined && element.status !== 'ready' ? ` ${css[`nodeStatus_${element.status}`] ?? ''}` : ''
+  const winnerBadge = element.winner === true
   return createElement(
     'div',
     {
-      className: css.node,
+      className: `${css.node}${statusClass}`,
       'data-uuid': element.uuid ?? '',
       'data-filepath': element.filePath,
     },
@@ -142,6 +144,7 @@ export function CanvasNode({ element, t }: CanvasNodeProps): ReactNode {
       { className: css.nodeHeader },
       createElement('span', { className: kindDotClass, 'aria-hidden': true }),
       createElement('span', { className: css.kindLabel }, kindLabel(element.kind, t)),
+      winnerBadge ? createElement('span', { className: css.winnerBadge, title: t('winner') }, '★') : null,
       createElement('span', { className: css.nodeTime }, formatTime(element.createdAt)),
     ),
     createElement('div', { className: css.nodeTitle }, element.title),

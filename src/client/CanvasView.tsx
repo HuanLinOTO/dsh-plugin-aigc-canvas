@@ -229,12 +229,36 @@ export function CanvasView({ store, t }: CanvasViewProps): ReactNode {
   const [dropTarget, setDropTarget] = useState<{ x: number; y: number } | undefined>(undefined)
   const [uploading, setUploading] = useState(false)
   const [showLog, setShowLog] = useState(false)
+  const [statusFilter, setStatusFilter] = useState<Set<string>>(new Set(['ready']))
   const surfaceRef = useRef<HTMLElement | null>(null)
 
   // Track the previous snapshot's element uuids so we can detect when new
   // elements appear (model just placed something) and pan the viewport to
   // bring the newest one into view at "center-left" of the visible area.
   const prevUuidsRef = useRef<Set<string>>(new Set())
+
+  /** Toggle one status in the filter set (checkbox handler). */
+  const toggleStatus = (status: string): void => {
+    setStatusFilter(prev => {
+      const next = new Set(prev)
+      if (next.has(status)) next.delete(status)
+      else next.add(status)
+      // Never allow an empty filter — fall back to 'ready'.
+      if (next.size === 0) next.add('ready')
+      return next
+    })
+  }
+
+  /** Filtered elements based on the status filter checkboxes. */
+  const filteredElements = state.elements.filter(el => {
+    const status = el.status ?? 'ready'
+    return statusFilter.has(status)
+  })
+  /** Filtered edges: only those whose source AND target are in the filtered set. */
+  const filteredElementPaths = new Set(filteredElements.map(e => e.filePath))
+  const filteredEdges = state.edges.filter(e =>
+    filteredElementPaths.has(e.source) && filteredElementPaths.has(e.target),
+  )
 
   // Pan gesture (drag on empty background).
   const panRef = useRef<{ pointerId: number; startX: number; startY: number; orig: Viewport } | null>(null)
@@ -604,6 +628,41 @@ export function CanvasView({ store, t }: CanvasViewProps): ReactNode {
         },
         '📊',
       ),
+      // Status filter checkboxes (per docs/product/01-agent-autonomy.md §5).
+      createElement('span', { className: css.statusFilter },
+        createElement('label', { className: css.statusFilterLabel },
+          createElement('input', {
+            type: 'checkbox',
+            checked: statusFilter.has('ready'),
+            onChange: () => toggleStatus('ready'),
+          }),
+          t('statusReady'),
+        ),
+        createElement('label', { className: css.statusFilterLabel },
+          createElement('input', {
+            type: 'checkbox',
+            checked: statusFilter.has('draft'),
+            onChange: () => toggleStatus('draft'),
+          }),
+          t('statusDraft'),
+        ),
+        createElement('label', { className: css.statusFilterLabel },
+          createElement('input', {
+            type: 'checkbox',
+            checked: statusFilter.has('rejected'),
+            onChange: () => toggleStatus('rejected'),
+          }),
+          t('statusRejected'),
+        ),
+        createElement('label', { className: css.statusFilterLabel },
+          createElement('input', {
+            type: 'checkbox',
+            checked: statusFilter.has('archived'),
+            onChange: () => toggleStatus('archived'),
+          }),
+          t('statusArchived'),
+        ),
+      ),
     ),
     createElement(
       'div',
@@ -649,9 +708,9 @@ export function CanvasView({ store, t }: CanvasViewProps): ReactNode {
                 className: css.edgeLayer,
                 'aria-hidden': true,
               },
-              ...state.edges.map(edge => renderEdge(edge, resolvePos)),
+              ...filteredEdges.map(edge => renderEdge(edge, resolvePos)),
             ),
-            ...state.elements.map(el => {
+            ...filteredElements.map(el => {
               const pos = posOf(el)
               return createElement(
                 'div',

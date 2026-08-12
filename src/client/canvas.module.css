@@ -149,12 +149,83 @@
   stroke-linejoin: round;
 }
 
+/* Line-style variants per EdgeRelation group (see CanvasView.lineStyleOf).
+ * Applied as an additional class alongside .edgeLine / .edgeArrow. */
+
+/* Direct inputs: input / first_frame / last_frame / audio_track (default solid). */
+.edgeLineSolid {
+  stroke: var(--dsw-alias-label-tertiary);
+  stroke-dasharray: none;
+  stroke-width: 2.5;
+}
+
+/* References: reference / style / mask (dashed). */
+.edgeLineDashed {
+  stroke: #5b8def;
+  stroke-dasharray: 8 4;
+  stroke-width: 2;
+  stroke-opacity: 0.7;
+}
+
+/* Variations / candidates: variation_of / remix_of / alternative_of (dotted). */
+.edgeLineDotted {
+  stroke: #c77dff;
+  stroke-dasharray: 2 4;
+  stroke-width: 2;
+  stroke-opacity: 0.7;
+}
+
+/* Edit chain: edited_from (bold solid). */
+.edgeLineBold {
+  stroke: var(--dsw-alias-label-secondary);
+  stroke-dasharray: none;
+  stroke-width: 4;
+  stroke-opacity: 0.8;
+}
+
 .edgeArrow {
   fill: var(--dsw-alias-label-tertiary);
   fill-opacity: 0.6;
   stroke: var(--dsw-alias-label-tertiary);
   stroke-width: 1;
   stroke-opacity: 0.6;
+}
+
+/* The line-style class also applies to the arrowhead so the arrow matches
+ * the line color + opacity of its relation group. */
+.edgeArrow.edgeLineDashed {
+  fill: #5b8def;
+  stroke: #5b8def;
+  fill-opacity: 0.7;
+  stroke-opacity: 0.7;
+}
+.edgeArrow.edgeLineDotted {
+  fill: #c77dff;
+  stroke: #c77dff;
+  fill-opacity: 0.7;
+  stroke-opacity: 0.7;
+}
+.edgeArrow.edgeLineBold {
+  fill: var(--dsw-alias-label-secondary);
+  stroke: var(--dsw-alias-label-secondary);
+  fill-opacity: 0.8;
+  stroke-opacity: 0.8;
+}
+
+/* Label chip rendered at the curve midpoint (the relation short name). */
+.edgeLabelBg {
+  fill: var(--dsw-alias-bg-layer-2);
+  stroke: var(--dsw-alias-border-l2);
+  stroke-width: 1;
+}
+
+.edgeLabel {
+  font: var(--dsw-font-xxxs-11);
+  fill: var(--dsw-alias-label-secondary);
+  text-anchor: middle;
+  dominant-baseline: middle;
+  user-select: none;
+  pointer-events: none;
 }
 
 .edgePort {

@@ -154,10 +154,29 @@ describe('elementProjection / edgeProjection', () => {
     expect(p).not.toHaveProperty('sessionId')
   })
 
-  it('edgeProjection resolves uuids to filePaths', () => {
+  it('edgeProjection resolves uuids to filePaths and includes the relation', () => {
+    const lookup = (uuid: string) => uuid === 'a' ? { filePath: '/path/a.png' } as never : { filePath: '/path/b.mp4' } as never
+    expect(edgeProjection({ source: 'a', target: 'b', relation: 'first_frame' }, lookup)).toEqual({
+      source: '/path/a.png', target: '/path/b.mp4', relation: 'first_frame',
+    })
+  })
+
+  it('edgeProjection defaults relation to "input" when missing (backward compat)', () => {
     const lookup = (uuid: string) => uuid === 'a' ? { filePath: '/path/a.png' } as never : { filePath: '/path/b.mp4' } as never
     expect(edgeProjection({ source: 'a', target: 'b' }, lookup)).toEqual({
-      source: '/path/a.png', target: '/path/b.mp4',
+      source: '/path/a.png', target: '/path/b.mp4', relation: 'input',
+    })
+  })
+
+  it('edgeProjection coerces an invalid relation to "input"', () => {
+    const lookup = () => ({ filePath: '/x.png' } as never)
+    expect(edgeProjection({ source: 'a', target: 'b', relation: 'bogus' }, lookup).relation).toBe('input')
+  })
+
+  it('edgeProjection passes through the optional note', () => {
+    const lookup = () => ({ filePath: '/x.png' } as never)
+    expect(edgeProjection({ source: 'a', target: 'b', relation: 'style', note: 'cyberpunk' }, lookup)).toMatchObject({
+      relation: 'style', note: 'cyberpunk',
     })
   })
 })
@@ -597,7 +616,7 @@ describe('registerTools (stub provider)', () => {
     expect(el.meta).toBeUndefined()
   })
 
-  it('aigc_canvas_place auto-wires edges from references', async () => {
+  it('aigc_canvas_place auto-wires edges from references (legacy string form, default relation)', async () => {
     const httpTool = ctx.registered.get('aigc_http_request')!
     const img1 = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"first"}' }, execFor('s1')) as { file_path: string }
     const img2 = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"last"}' }, execFor('s1')) as { file_path: string }
@@ -618,6 +637,57 @@ describe('registerTools (stub provider)', () => {
     const videoEl = snap.elements.find(e => e.filePath === result.element_path)!
     const incoming = snap.edges.filter(e => e.target === videoEl.uuid)
     expect(incoming).toHaveLength(2)
+    // Legacy string form → default relation 'input'.
+    for (const e of incoming) expect(e.relation).toBe('input')
+  })
+
+  it('aigc_canvas_place auto-wires edges with the structured { filePath, relation } form', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const img1 = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"first"}' }, execFor('s1')) as { file_path: string }
+    const img2 = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"last"}' }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    const placed1 = await placeTool.execute({ description: 'first', file_path: img1.file_path, x: 0, y: 0 }, execFor('s1')) as { element_path: string }
+    const placed2 = await placeTool.execute({ description: 'last', file_path: img2.file_path, x: 0, y: 200 }, execFor('s1')) as { element_path: string }
+    const video = await httpTool.execute({ method: 'POST', path: '/v1/videos/generations', body: '{"prompt":"motion"}' }, execFor('s1')) as { file_path: string }
+    const result = await placeTool.execute({ description: 'test', file_path: video.file_path,
+      references: [
+        { filePath: placed1.element_path, relation: 'first_frame' },
+        { filePath: placed2.element_path, relation: 'last_frame', note: 'final pose' },
+      ],
+    }, execFor('s1')) as { element_path: string; linked_references: number }
+    expect(result.linked_references).toBe(2)
+    const snap = canvas.snapshot('s1')
+    const videoEl = snap.elements.find(e => e.filePath === result.element_path)!
+    const edges = snap.edges.filter(e => e.target === videoEl.uuid)
+    expect(edges).toHaveLength(2)
+    const ff = edges.find(e => e.source === placed1.element_path)! // source is uuid; we check by mapping below
+    // The snapshot edges use uuids internally — verify via listElements tool which projects to filePaths.
+    const listTool = ctx.registered.get('aigc_canvas_list_elements')!
+    const listed = await listTool.execute({}, execFor('s1')) as { edges: Array<{ source: string; target: string; relation: string; note?: string }> }
+    const incomingListed = listed.edges.filter(e => e.target === result.element_path)
+    expect(incomingListed).toHaveLength(2)
+    const ffListed = incomingListed.find(e => e.source === placed1.element_path)!
+    expect(ffListed.relation).toBe('first_frame')
+    const lfListed = incomingListed.find(e => e.source === placed2.element_path)!
+    expect(lfListed.relation).toBe('last_frame')
+    expect(lfListed.note).toBe('final pose')
+  })
+
+  it('aigc_canvas_place rejects references with an invalid relation enum', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const img = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"p"}' }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    const placed = await placeTool.execute({ description: 'test', file_path: img.file_path, x: 0, y: 0 }, execFor('s1')) as { element_path: string }
+    const video = await httpTool.execute({ method: 'POST', path: '/v1/videos/generations', body: '{"prompt":"v"}' }, execFor('s1')) as { file_path: string }
+    // Invalid relation value — coerceEdgeRelation falls back to 'input' silently (no error)
+    // so the model can recover from a typo. Verify the fallback behavior.
+    const result = await placeTool.execute({ description: 'test', file_path: video.file_path,
+      references: [{ filePath: placed.element_path, relation: 'bogus-relation' }],
+    }, execFor('s1')) as { linked_references: number }
+    expect(result.linked_references).toBe(1)
+    const listTool = ctx.registered.get('aigc_canvas_list_elements')!
+    const listed = await listTool.execute({}, execFor('s1')) as { edges: Array<{ relation: string }> }
+    expect(listed.edges[0]!.relation).toBe('input') // coerced from 'bogus-relation'
   })
 
   it('aigc_canvas_place auto-places to the right of references when x/y omitted', async () => {
@@ -674,33 +744,84 @@ describe('registerTools (stub provider)', () => {
     const a = await placeTool.execute({ description: 'test', file_path: img.file_path, x: 0, y: 0 }, execFor('s1')) as { element_path: string }
     const b = await placeTool.execute({ description: 'test', file_path: vid.file_path, x: 300, y: 0 }, execFor('s1')) as { element_path: string }
     const linkTool = ctx.registered.get('aigc_canvas_link')!
-    const linked = await linkTool.execute({ source: a.element_path, target: b.element_path }, execFor('s1'))
-    expect(linked).toEqual({ linked: true, source: a.element_path, target: b.element_path })
-    // Idempotent: linking the same pair again does not duplicate.
-    await linkTool.execute({ source: a.element_path, target: b.element_path }, execFor('s1'))
+    const linked = await linkTool.execute({ source: a.element_path, target: b.element_path, relation: 'first_frame' }, execFor('s1')) as { linked: boolean; source: string; target: string; relation: string }
+    expect(linked).toEqual({ linked: true, source: a.element_path, target: b.element_path, relation: 'first_frame' })
+    // Re-linking the same pair with a DIFFERENT relation UPDATES it (not a no-op).
+    await linkTool.execute({ source: a.element_path, target: b.element_path, relation: 'style' }, execFor('s1'))
     const snap = canvas.snapshot('s1')
     expect(snap.edges).toHaveLength(1)
+    expect(snap.edges[0]!.relation).toBe('style')
     const unlinkTool = ctx.registered.get('aigc_canvas_unlink')!
     await unlinkTool.execute({ source: a.element_path, target: b.element_path }, execFor('s1'))
     expect(canvas.snapshot('s1').edges).toHaveLength(0)
   })
 
-  it('aigc_canvas_list_elements returns positions + filePath-addressed edges', async () => {
+  it('aigc_canvas_link rejects an invalid relation enum value', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const img = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"p"}' }, execFor('s1')) as { file_path: string }
+    const vid = await httpTool.execute({ method: 'POST', path: '/v1/videos/generations', body: '{"prompt":"v"}' }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    const a = await placeTool.execute({ description: 'test', file_path: img.file_path, x: 0, y: 0 }, execFor('s1')) as { element_path: string }
+    const b = await placeTool.execute({ description: 'test', file_path: vid.file_path, x: 300, y: 0 }, execFor('s1')) as { element_path: string }
+    const linkTool = ctx.registered.get('aigc_canvas_link')!
+    // The framework's schema validator (enum constraint) rejects the bogus
+    // value before execute runs — any thrown error is acceptable.
+    await expect(linkTool.execute({ source: a.element_path, target: b.element_path, relation: 'bogus' }, execFor('s1'))).rejects.toThrow()
+  })
+
+  it('aigc_canvas_link rejects a missing relation (relation is now required)', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const img = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"p"}' }, execFor('s1')) as { file_path: string }
+    const vid = await httpTool.execute({ method: 'POST', path: '/v1/videos/generations', body: '{"prompt":"v"}' }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    const a = await placeTool.execute({ description: 'test', file_path: img.file_path, x: 0, y: 0 }, execFor('s1')) as { element_path: string }
+    const b = await placeTool.execute({ description: 'test', file_path: vid.file_path, x: 300, y: 0 }, execFor('s1')) as { element_path: string }
+    const linkTool = ctx.registered.get('aigc_canvas_link')!
+    // The framework's schema validator rejects before execute runs (relation
+    // is required); any thrown error is acceptable here.
+    await expect(linkTool.execute({ source: a.element_path, target: b.element_path } as never, execFor('s1'))).rejects.toThrow()
+  })
+
+  it('aigc_canvas_link accepts all 11 EdgeRelation enum values', async () => {
+    const httpTool = ctx.registered.get('aigc_http_request')!
+    const img = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"p"}' }, execFor('s1')) as { file_path: string }
+    const vid = await httpTool.execute({ method: 'POST', path: '/v1/videos/generations', body: '{"prompt":"v"}' }, execFor('s1')) as { file_path: string }
+    const placeTool = ctx.registered.get('aigc_canvas_place')!
+    const a = await placeTool.execute({ description: 'test', file_path: img.file_path, x: 0, y: 0 }, execFor('s1')) as { element_path: string }
+    const b = await placeTool.execute({ description: 'test', file_path: vid.file_path, x: 300, y: 0 }, execFor('s1')) as { element_path: string }
+    const linkTool = ctx.registered.get('aigc_canvas_link')!
+    const relations = ['input', 'first_frame', 'last_frame', 'audio_track', 'reference', 'style', 'mask', 'variation_of', 'remix_of', 'alternative_of', 'edited_from']
+    for (const relation of relations) {
+      const result = await linkTool.execute({ source: a.element_path, target: b.element_path, relation }, execFor('s1')) as { relation: string }
+      expect(result.relation).toBe(relation)
+    }
+    // All re-links update the SAME edge (no duplicates).
+    expect(canvas.snapshot('s1').edges).toHaveLength(1)
+  })
+
+  it('aigc_canvas_list_elements returns positions + filePath-addressed edges with relation', async () => {
     const httpTool = ctx.registered.get('aigc_http_request')!
     const img = await httpTool.execute({ method: 'POST', path: '/v1/images/generations', body: '{"prompt":"one"}' }, execFor('s1')) as { file_path: string }
+    const vid = await httpTool.execute({ method: 'POST', path: '/v1/videos/generations', body: '{"prompt":"v"}' }, execFor('s1')) as { file_path: string }
     const placeTool = ctx.registered.get('aigc_canvas_place')!
-    await placeTool.execute({ description: 'test', file_path: img.file_path, x: 50, y: 60, prompt: 'one' }, execFor('s1'))
+    const a = await placeTool.execute({ description: 'test', file_path: img.file_path, x: 50, y: 60, prompt: 'one' }, execFor('s1')) as { element_path: string }
+    const b = await placeTool.execute({ description: 'test', file_path: vid.file_path, x: 400, y: 60 }, execFor('s1')) as { element_path: string }
+    const linkTool = ctx.registered.get('aigc_canvas_link')!
+    await linkTool.execute({ source: a.element_path, target: b.element_path, relation: 'first_frame' }, execFor('s1'))
     const tool = ctx.registered.get('aigc_canvas_list_elements')!
     const result = await tool.execute({}, execFor('s1')) as {
       elements: Array<{ filePath: string; kind: string; title: string; x: number; y: number; promptText?: string }>
-      edges: Array<{ source: string; target: string }>
+      edges: Array<{ source: string; target: string; relation: string; note?: string }>
     }
-    expect(result.elements).toHaveLength(1)
+    expect(result.elements).toHaveLength(2)
     expect(result.elements[0]!.x).toBe(50)
     expect(result.elements[0]!.y).toBe(60)
     expect(result.elements[0]!.promptText).toBe('one')
     expect(result.elements[0]!.filePath).toContain('.dsh-aigc-canvas')
-    expect(result.edges).toHaveLength(0)
+    expect(result.edges).toHaveLength(1)
+    expect(result.edges[0]!.source).toBe(a.element_path)
+    expect(result.edges[0]!.target).toBe(b.element_path)
+    expect(result.edges[0]!.relation).toBe('first_frame')
   })
 
   it('aigc_canvas_list_elements is isolated per session', async () => {

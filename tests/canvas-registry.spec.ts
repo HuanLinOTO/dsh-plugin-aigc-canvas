@@ -98,27 +98,51 @@ describe('AigcCanvasService', () => {
     const ref1 = await service.addMedia('s1', { kind: 'image', title: 'r1', producedBy: 'tool', mediaBytes: Buffer.from([1]) }, cwd)
     const ref2 = await service.addMedia('s1', { kind: 'image', title: 'r2', producedBy: 'tool', mediaBytes: Buffer.from([2]) }, cwd)
     const out = await service.addMedia('s1', { kind: 'video', title: 'o', producedBy: 'tool', mediaBytes: Buffer.from([3]) }, cwd)
-    await service.wireEdges('s1', [prompt.uuid, ref1.uuid, ref2.uuid], out.uuid)
+    await service.wireEdges('s1', [
+      { uuid: prompt.uuid },
+      { uuid: ref1.uuid, relation: 'first_frame' },
+      { uuid: ref2.uuid, relation: 'last_frame' },
+    ], out.uuid)
     const snap = service.snapshot('s1')
     expect(snap.edges).toEqual([
-      { source: prompt.uuid, target: out.uuid },
-      { source: ref1.uuid, target: out.uuid },
-      { source: ref2.uuid, target: out.uuid },
+      { source: prompt.uuid, target: out.uuid, relation: 'input' },
+      { source: ref1.uuid, target: out.uuid, relation: 'first_frame' },
+      { source: ref2.uuid, target: out.uuid, relation: 'last_frame' },
     ])
+  })
+
+  it('wireEdges defaults relation to "input" when omitted', async () => {
+    const prompt = await service.addPrompt('s1', { title: 'p', promptText: 'p', producedBy: 'tool' }, cwd)
+    const out = await service.addMedia('s1', { kind: 'image', title: 'o', producedBy: 'tool', mediaBytes: Buffer.from([1]) }, cwd)
+    await service.wireEdges('s1', [{ uuid: prompt.uuid }], out.uuid)
+    expect(service.snapshot('s1').edges[0]!.relation).toBe('input')
+  })
+
+  it('wireEdges updates relation on re-link (not a no-op)', async () => {
+    const a = await service.addMedia('s1', { kind: 'image', title: 'a', producedBy: 'tool', mediaBytes: Buffer.from([1]) }, cwd)
+    const b = await service.addMedia('s1', { kind: 'video', title: 'b', producedBy: 'tool', mediaBytes: Buffer.from([2]) }, cwd)
+    // First link as 'input'.
+    await service.wireEdges('s1', [{ uuid: a.uuid }], b.uuid)
+    expect(service.snapshot('s1').edges[0]!.relation).toBe('input')
+    // Re-link as 'first_frame' — should update, not duplicate.
+    await service.wireEdges('s1', [{ uuid: a.uuid, relation: 'first_frame' }], b.uuid)
+    const snap = service.snapshot('s1')
+    expect(snap.edges).toHaveLength(1)
+    expect(snap.edges[0]!.relation).toBe('first_frame')
   })
 
   it('wireEdges skips duplicate edges (idempotent on retry)', async () => {
     const prompt = await service.addPrompt('s1', { title: 'p', promptText: 'p', producedBy: 'tool' }, cwd)
     const out = await service.addMedia('s1', { kind: 'image', title: 'o', producedBy: 'tool', mediaBytes: Buffer.from([1]) }, cwd)
-    await service.wireEdges('s1', [prompt.uuid], out.uuid)
-    await service.wireEdges('s1', [prompt.uuid], out.uuid)
+    await service.wireEdges('s1', [{ uuid: prompt.uuid }], out.uuid)
+    await service.wireEdges('s1', [{ uuid: prompt.uuid }], out.uuid)
     const snap = service.snapshot('s1')
-    expect(snap.edges).toEqual([{ source: prompt.uuid, target: out.uuid }])
+    expect(snap.edges).toEqual([{ source: prompt.uuid, target: out.uuid, relation: 'input' }])
   })
 
   it('wireEdges throws when the target uuid does not exist', async () => {
     const prompt = await service.addPrompt('s1', { title: 'p', promptText: 'p', producedBy: 'tool' }, cwd)
-    await expect(service.wireEdges('s1', [prompt.uuid], 'nonexistent-uuid')).rejects.toThrow(AigcError)
+    await expect(service.wireEdges('s1', [{ uuid: prompt.uuid }], 'nonexistent-uuid')).rejects.toThrow(AigcError)
   })
 
   it('getElement throws AigcError when the uuid is not in the session', () => {
@@ -248,7 +272,7 @@ describe('AigcCanvasService', () => {
   it('unlink removes one edge and is idempotent', async () => {
     const a = await service.addMedia('s1', { kind: 'image', title: 'a', producedBy: 'tool', mediaBytes: Buffer.from([1]) }, cwd)
     const b = await service.addMedia('s1', { kind: 'video', title: 'b', producedBy: 'tool', mediaBytes: Buffer.from([2]) }, cwd)
-    await service.wireEdges('s1', [a.uuid], b.uuid)
+    await service.wireEdges('s1', [{ uuid: a.uuid }], b.uuid)
     expect(service.snapshot('s1').edges).toHaveLength(1)
     await service.unlink('s1', a.uuid, b.uuid)
     expect(service.snapshot('s1').edges).toHaveLength(0)
@@ -261,8 +285,8 @@ describe('AigcCanvasService', () => {
     const b = await service.addMedia('s1', { kind: 'video', title: 'b', producedBy: 'tool', mediaBytes: Buffer.from([2]) }, cwd)
     const c = await service.addMedia('s1', { kind: 'image', title: 'c', producedBy: 'tool', mediaBytes: Buffer.from([3]) }, cwd)
     // a → b, b → c
-    await service.wireEdges('s1', [a.uuid], b.uuid)
-    await service.wireEdges('s1', [b.uuid], c.uuid)
+    await service.wireEdges('s1', [{ uuid: a.uuid }], b.uuid)
+    await service.wireEdges('s1', [{ uuid: b.uuid }], c.uuid)
     expect(service.snapshot('s1').elements).toHaveLength(3)
     expect(service.snapshot('s1').edges).toHaveLength(2)
     // Delete b: should remove b and both edges referencing it.
@@ -288,6 +312,29 @@ describe('AigcCanvasService', () => {
     const el = service.getElement('s1', 'old-1')
     expect(el.x).toBe(0)
     expect(el.y).toBe(0)
+  })
+
+  it('hydrates legacy edges by defaulting missing relation to "input"', async () => {
+    // Old canvas.json files predate the `relation` field — every edge must
+    // be normalized to relation='input' on hydrate so downstream code can
+    // assume the field is always present.
+    const dir = canvasDirFor(cwd, 's1')
+    await mkdir(dir, { recursive: true })
+    const legacyEdge = { source: 'a', target: 'b' } // no relation field
+    await writeFile(canvasJsonPath(cwd, 's1'), JSON.stringify({
+      sessionId: 's1',
+      elements: [
+        { uuid: 'a', sessionId: 's1', kind: 'image', title: 'a', x: 0, y: 0, createdAt: 1, producedBy: 'old', filePath: join(dir, 'a.png') },
+        { uuid: 'b', sessionId: 's1', kind: 'video', title: 'b', x: 0, y: 0, createdAt: 1, producedBy: 'old', filePath: join(dir, 'b.mp4') },
+      ],
+      edges: [legacyEdge],
+    }))
+    await service.ensureHydrated('s1')
+    const snap = service.snapshot('s1')
+    expect(snap.edges).toHaveLength(1)
+    expect(snap.edges[0]!.source).toBe('a')
+    expect(snap.edges[0]!.target).toBe('b')
+    expect(snap.edges[0]!.relation).toBe('input')
   })
 
   it('persists state to canvas.json after every mutation', async () => {

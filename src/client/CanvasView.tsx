@@ -16,7 +16,7 @@
  * (the host notifies after persisting the move).
  */
 import { Component, createElement, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ErrorInfo, type ReactNode, type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent, type ChangeEvent as ReactChangeEvent } from 'react'
-import type { AigcCanvasState, AigcEdge, AigcElement } from './api.js'
+import type { AigcCanvasState, AigcEdge, AigcElement, EdgeRelation } from './api.js'
 import { CanvasStore } from './store.js'
 import { CanvasNode } from './CanvasNode.js'
 import css from './canvas.module.css'
@@ -79,13 +79,77 @@ type PosResolver = (uuid: string) => { x: number; y: number } | undefined
 const PORT_R = 5
 
 /**
+ * Line-style group for one EdgeRelation. Drives the SVG path's stroke
+ * pattern + width. The label (short human-readable text rendered at the
+ * curve's midpoint) is looked up separately in `EDGE_RELATION_LABEL`.
+ *
+ * Group mapping (per docs/product/01-agent-autonomy.md §1):
+ *  - solid:   direct inputs (input / first_frame / last_frame / audio_track)
+ *  - dashed:  references (reference / style / mask)
+ *  - dotted:  variations / candidates (variation_of / remix_of / alternative_of)
+ *  - bold:    ffmpeg edit chain (edited_from)
+ */
+type EdgeLineStyle = 'solid' | 'dashed' | 'dotted' | 'bold'
+
+function lineStyleOf(relation: EdgeRelation | undefined): EdgeLineStyle {
+  switch (relation) {
+    case 'reference':
+    case 'style':
+    case 'mask':
+      return 'dashed'
+    case 'variation_of':
+    case 'remix_of':
+    case 'alternative_of':
+      return 'dotted'
+    case 'edited_from':
+      return 'bold'
+    case 'input':
+    case 'first_frame':
+    case 'last_frame':
+    case 'audio_track':
+    case undefined:
+    default:
+      return 'solid'
+  }
+}
+
+/** Short human-readable label for one EdgeRelation (rendered at the curve midpoint). */
+const EDGE_RELATION_LABEL: Record<EdgeRelation, string> = {
+  input: '',
+  first_frame: '首帧',
+  last_frame: '尾帧',
+  audio_track: '音轨',
+  reference: '参考',
+  style: '风格',
+  mask: '蒙版',
+  variation_of: '变体',
+  remix_of: '再创作',
+  alternative_of: '候选',
+  edited_from: '编辑自',
+}
+
+/** CSS class suffix for one EdgeLineStyle (appended to `edgeLine` / `edgeArrow`). */
+function edgeLineClass(style: EdgeLineStyle): string {
+  switch (style) {
+    case 'dashed': return css.edgeLineDashed ?? ''
+    case 'dotted': return css.edgeLineDotted ?? ''
+    case 'bold': return css.edgeLineBold ?? ''
+    case 'solid':
+    default: return css.edgeLineSolid ?? ''
+  }
+}
+
+/**
  * One smooth-curve edge: exits the source's right-center port, curves
  * through two control points, enters the target's left-center port.
- * Drawn as an SVG cubic-bezier path + two port circles + an arrowhead.
+ * Drawn as an SVG cubic-bezier path + two port circles + an arrowhead,
+ * with line style + label driven by the edge's `relation`.
  *
- * The control points sit on the horizontal axis at a fixed offset from
- * each port so the curve bows out smoothly regardless of distance —
- * looks like a relaxed S when the ports are vertically offset.
+ * Line styles per relation group:
+ *  - solid (default): input / first_frame / last_frame / audio_track
+ *  - dashed: reference / style / mask
+ *  - dotted: variation_of / remix_of / alternative_of
+ *  - bold: edited_from (ffmpeg edit chain)
  *
  * Uses the position resolver so the edge follows live drag positions
  * (drafts) in real time, not just the persisted snapshot.
@@ -117,11 +181,31 @@ function renderEdge(edge: AigcEdge, resolvePos: PosResolver): ReactNode {
   const ly = ty - wing
   const ry = ty + wing
   const arrowPath = `M ${tx} ${ty} L ${baseX} ${ly} L ${baseX} ${ry} Z`
+  const style = lineStyleOf(edge.relation)
+  const lineClass = edgeLineClass(style)
+  const label = edge.relation !== undefined ? EDGE_RELATION_LABEL[edge.relation] : ''
+  // Label position: midpoint of the cubic bezier curve ( De Casteljau's
+  // algorithm at t=0.5). The label sits on a small filled chip so it
+  // stays readable over the canvas grid.
+  const mx = 0.125 * sx + 0.375 * c1x + 0.375 * c2x + 0.125 * tx
+  const my = 0.125 * sy + 0.375 * c1y + 0.375 * c2y + 0.125 * ty
   return createElement('g', { key: `${edge.source}:${edge.target}` },
-    createElement('path', { d, className: css.edgeLine, fill: 'none' }),
-    createElement('path', { d: arrowPath, className: css.edgeArrow }),
+    createElement('path', { d, className: `${css.edgeLine} ${lineClass}`, fill: 'none' }),
+    createElement('path', { d: arrowPath, className: `${css.edgeArrow} ${lineClass}` }),
     createElement('circle', { cx: sx, cy: sy, r: PORT_R, className: css.edgePort }),
     createElement('circle', { cx: tx, cy: ty, r: PORT_R, className: css.edgePort }),
+    ...(label !== '' ? [
+      createElement('rect', {
+        key: 'label-bg',
+        x: mx - 24, y: my - 9, width: 48, height: 18, rx: 9,
+        className: css.edgeLabelBg,
+      }),
+      createElement('text', {
+        key: 'label-text',
+        x: mx, y: my + 4, textAnchor: 'middle',
+        className: css.edgeLabel,
+      }, label),
+    ] : []),
   )
 }
 

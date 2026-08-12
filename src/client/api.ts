@@ -15,6 +15,27 @@ export class AigcApiError extends Error {
 /** Element kind (matches the host enum). */
 export type AigcElementKind = 'prompt' | 'image' | 'video' | 'audio'
 
+/**
+ * Semantic relation on an edge (matches the host EdgeRelation enum).
+ * Drives the canvas line style + label. Optional on the client side for
+ * backward compat with old canvas.json / WS pushes that predate the field
+ * (defaults to 'input' in renderEdge).
+ *
+ * @see EdgeRelation in canvas-registry.ts for the full description.
+ */
+export type EdgeRelation =
+  | 'input'
+  | 'first_frame'
+  | 'last_frame'
+  | 'audio_track'
+  | 'reference'
+  | 'style'
+  | 'mask'
+  | 'variation_of'
+  | 'remix_of'
+  | 'alternative_of'
+  | 'edited_from'
+
 /** One canvas element (client view). */
 export interface AigcElement {
   filePath: string
@@ -34,10 +55,21 @@ export interface AigcElement {
   description?: string
 }
 
-/** One canvas edge (source filePath → target filePath). */
+/** One canvas edge (source filePath → target filePath, with semantic relation). */
 export interface AigcEdge {
   source: string
   target: string
+  /**
+   * Why the source was wired to the target. Drives line style + label:
+   *  - solid: input / first_frame / last_frame / audio_track (direct inputs)
+   *  - dashed: reference / style / mask (references)
+   *  - dotted: variation_of / remix_of / alternative_of (variations)
+   *  - bold solid: edited_from (ffmpeg edit chain)
+   * Optional for backward compat; defaults to 'input' when undefined.
+   */
+  relation?: EdgeRelation
+  /** Optional short note supplementing the relation (free text). */
+  note?: string
 }
 
 /** Full canvas state for one session. */

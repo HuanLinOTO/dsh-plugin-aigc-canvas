@@ -45,8 +45,8 @@ import type { ContentBlock, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-tools'
 import type { Context } from './context-types.js'
 import type { ResolvedAigcProvider } from './config.js'
-import type { AigcElement, AigcCanvasService } from './canvas-registry.js'
-import { canvasDirFor } from './canvas-registry.js'
+import type { AigcElement, AigcCanvasService, EdgeRelation } from './canvas-registry.js'
+import { canvasDirFor, EDGE_RELATIONS, DEFAULT_EDGE_RELATION, coerceEdgeRelation } from './canvas-registry.js'
 import { executeProviderRequest, INLINE_TEXT_CAP, type ProviderBinaryKind } from './provider-http.js'
 import { executeMediaEdit, MEDIA_EDIT_OPERATIONS, type MediaEditOperation } from './media-edit.js'
 import { AigcError } from './wire.js'
@@ -100,10 +100,12 @@ function elementProjection(el: AigcElement): Record<string, unknown> {
 }
 
 /** Edge projection: resolve uuids to filePaths so the agent can read the graph. */
-function edgeProjection(edge: { source: string; target: string }, lookup: (uuid: string) => AigcElement): { source: string; target: string } {
+function edgeProjection(edge: { source: string; target: string; relation?: EdgeRelation; note?: string }, lookup: (uuid: string) => AigcElement): { source: string; target: string; relation: EdgeRelation; note?: string } {
   return {
     source: lookup(edge.source)?.filePath ?? edge.source,
     target: lookup(edge.target)?.filePath ?? edge.target,
+    relation: coerceEdgeRelation(edge.relation),
+    ...(edge.note !== undefined ? { note: edge.note } : {}),
   }
 }
 
@@ -762,8 +764,8 @@ export function registerTools(
       'Place a file (usually the file_path returned by aigc_http_request) onto the session\'s free canvas at '
       + 'position (x, y). The file must already exist inside the session canvas directory. '
       + 'Optionally record the prompt text and generation parameters (meta) — they are shown when the user '
-      + 'double-clicks the element. Pass `references` (filePaths of existing elements the new one was generated '
-      + 'from) to auto-wire edges from those elements to the new one. '
+      + 'double-clicks the element. Pass `references` (filePaths + relations of existing elements the new one was '
+      + 'generated from) to auto-wire edges from those elements to the new one. '
       + 'x and y are OPTIONAL: PREFER OMITTING THEM and letting the host auto-place. '
       + 'When references are given, the new element lands to the RIGHT of the rightmost reference (vertically '
       + 'centered on the references); otherwise it goes BELOW the lowest existing element in a left-aligned '
@@ -787,7 +789,15 @@ export function registerTools(
       kind: { type: 'string', enum: ['image', 'video', 'audio', 'prompt'], description: 'Element kind. Inferred from the file extension when omitted.' },
       prompt: { type: 'string', description: 'The prompt text used to generate this file (shown on double-click).' },
       meta: { type: 'json', description: 'Generation parameters / metadata as a JSON OBJECT (e.g. {"size":"768x768","seed":42}). Shown on double-click. Do NOT pass a stringified JSON.' },
-      references: { type: 'array', items: { type: 'string' }, description: 'filePaths of existing canvas elements used as references; edges are wired from each reference to the new element.' },
+      references: {
+        type: 'array',
+        description: 'Existing canvas elements used as references; edges are wired from each reference to the new element. '
+          + 'Each entry is either a filePath string (defaults to relation "input") OR an object { filePath, relation, note? }. '
+          + 'Use the object form to record WHY each reference was used — relation drives the canvas line style + label and lets you '
+          + 'reason about the dependency graph later via aigc_canvas_list_elements. '
+          + `relation enum: ${(EDGE_RELATIONS as readonly string[]).join(' | ')}.`,
+        items: { type: 'json', description: 'A filePath string OR an object { filePath, relation?, note? }.' },
+      },
     },
     output: {
       schema: {
@@ -815,7 +825,7 @@ export function registerTools(
       kind?: string
       prompt?: string
       meta?: unknown
-      references?: string[]
+      references?: unknown
     }, exec) {
       exec.signal.throwIfAborted()
       const sessionId = sessionIdOf(exec)
@@ -833,15 +843,33 @@ export function registerTools(
       // Bound description to 40 chars to keep cards compact.
       const description = args.description.slice(0, 40)
       const meta = coerceMeta(args.meta)
-      // Resolve reference elements BEFORE placing so the host can position
-      // the new element to the right of its references (instead of the
-      // default bottom-of-column placement).
-      let refUuids: string[] | undefined
-      if (args.references !== undefined && args.references.length > 0) {
-        refUuids = []
-        for (const refPath of args.references) {
-          const refEl = canvas.getElementByPath(sessionId, refPath)
-          refUuids.push(refEl.uuid)
+      // Coerce references into a uniform { uuid, relation?, note? } shape.
+      // Accepts both the legacy string[] form and the new structured form.
+      let refInputs: { uuid: string; relation?: EdgeRelation; note?: string }[] | undefined
+      if (args.references !== undefined) {
+        if (!Array.isArray(args.references)) {
+          throw new AigcError('bad-request', 'references must be an array of filePath strings or { filePath, relation? } objects')
+        }
+        refInputs = []
+        for (const ref of args.references) {
+          if (typeof ref === 'string') {
+            // Legacy form: plain filePath, default relation 'input'.
+            const refEl = canvas.getElementByPath(sessionId, ref)
+            refInputs.push({ uuid: refEl.uuid })
+          } else if (ref !== null && typeof ref === 'object') {
+            const rec = ref as { filePath?: unknown; relation?: unknown; note?: unknown }
+            if (typeof rec.filePath !== 'string' || rec.filePath === '') {
+              throw new AigcError('bad-request', 'references[].filePath must be a non-empty string')
+            }
+            const refEl = canvas.getElementByPath(sessionId, rec.filePath)
+            const relation = typeof rec.relation === 'string'
+              ? coerceEdgeRelation(rec.relation)
+              : undefined
+            const note = typeof rec.note === 'string' ? rec.note : undefined
+            refInputs.push({ uuid: refEl.uuid, relation, note })
+          } else {
+            throw new AigcError('bad-request', 'references[] entries must be a string or { filePath, relation? } object')
+          }
         }
       }
       const el = await canvas.placeFile(sessionId, {
@@ -854,13 +882,13 @@ export function registerTools(
         description,
         ...(args.prompt !== undefined ? { promptText: args.prompt } : {}),
         ...(meta !== undefined ? { meta } : {}),
-        ...(refUuids !== undefined ? { referenceUuids: refUuids } : {}),
+        ...(refInputs !== undefined ? { referenceUuids: refInputs.map(r => r.uuid) } : {}),
       }, cwd)
       let linked = 0
-      if (refUuids !== undefined && refUuids.length > 0) {
+      if (refInputs !== undefined && refInputs.length > 0) {
         // Filter out self-references (can't happen after placeFile, but
         // be safe) and wire edges from each reference to the new element.
-        const filtered = refUuids.filter(u => u !== el.uuid)
+        const filtered = refInputs.filter(r => r.uuid !== el.uuid)
         if (filtered.length > 0) {
           await canvas.wireEdges(sessionId, filtered, el.uuid)
           linked = filtered.length
@@ -881,12 +909,28 @@ export function registerTools(
   register(defineTool({
     name: 'aigc_canvas_link',
     description:
-      'Create an edge from an existing source element to an existing target element (both filePath-addressed). '
-      + 'Use this to record that one element was generated from (or depends on) another. Idempotent: linking the '
-      + 'same pair twice is a no-op. Edges are rendered on the canvas as arrows from source to target.',
+      'Create (or update) an edge from an existing source element to an existing target element (both filePath-addressed) '
+      + 'with a semantic `relation` describing WHY the source was wired to the target. '
+      + 'Use this to record that one element was generated from / depends on / is a variant of another. '
+      + 'If an edge already exists between the same source → target, its relation (and optional note) is UPDATED in place '
+      + '(re-linking with a new relation is not a no-op — it changes the relation). Edges are rendered on the canvas as '
+      + 'arrows from source to target, with line style + label driven by the relation (solid for inputs, dashed for references, '
+      + 'dotted for variations).',
     parameters: {
       source: { type: 'string', required: true, description: 'filePath of the source element (the input / reference).' },
       target: { type: 'string', required: true, description: 'filePath of the target element (the produced output).' },
+      relation: {
+        type: 'string',
+        required: true,
+        enum: EDGE_RELATIONS as readonly string[],
+        description: 'Why the source was wired to the target. Drives the canvas line style + label and lets you reason about '
+          + 'the dependency graph later via aigc_canvas_list_elements. '
+          + 'Direct inputs (solid line): input / first_frame / last_frame / audio_track. '
+          + 'References (dashed line): reference / style / mask. '
+          + 'Variations (dotted line): variation_of (same prompt, different seed) / remix_of (changed prompt) / alternative_of (A/B candidate). '
+          + 'Edit chain (bold solid line): edited_from (ffmpeg media_edit output → input).',
+      },
+      note: { type: 'string', description: 'Optional short note supplementing the relation (free text). Not used for rendering decisions.' },
     },
     output: {
       schema: {
@@ -896,20 +940,27 @@ export function registerTools(
           linked: { type: 'boolean', required: true },
           source: { type: 'string', required: true },
           target: { type: 'string', required: true },
+          relation: { type: 'string', required: true, enum: EDGE_RELATIONS as readonly string[] },
         },
       },
-      render: textRender((v: { source: string; target: string }) => `Linked ${v.source} → ${v.target}.`),
+      render: textRender((v: { source: string; target: string; relation: string }) => `Linked ${v.source} →[${v.relation}]→ ${v.target}.`),
     },
-    execute: async (args: { source: string; target: string }, exec) => {
+    execute: async (args: { source: string; target: string; relation: string; note?: string }, exec) => {
+      if (typeof args.relation !== 'string' || !(EDGE_RELATIONS as readonly string[]).includes(args.relation)) {
+        throw new AigcError('bad-request', `relation must be one of: ${(EDGE_RELATIONS as readonly string[]).join(', ')}`)
+      }
+      const relation = args.relation as EdgeRelation
       const sessionId = sessionIdOf(exec)
       await canvas.ensureHydrated(sessionId)
       const sourceEl = canvas.getElementByPath(sessionId, args.source)
       const targetEl = canvas.getElementByPath(sessionId, args.target)
-      return canvas.wireEdges(sessionId, [sourceEl.uuid], targetEl.uuid).then(() => ({
+      await canvas.wireEdges(sessionId, [{ uuid: sourceEl.uuid, relation, ...(args.note !== undefined ? { note: args.note } : {}) }], targetEl.uuid)
+      return {
         linked: true,
         source: args.source,
         target: args.target,
-      }))
+        relation,
+      }
     },
   }))
 
@@ -953,9 +1004,12 @@ export function registerTools(
     description:
       'List every element and edge currently on the canvas for the calling agent\'s session. '
       + 'Returns each element\'s filePath (the primary identifier), kind (prompt/image/video/audio), title, canvas '
-      + 'position (x, y), producing tool, and metadata; and every edge (source filePath → target filePath). '
+      + 'position (x, y), producing tool, and metadata; and every edge with its semantic `relation` '
+      + '(source filePath →[relation]→ target filePath). '
       + 'Use this to recover state after a long sequence of tool calls, to find a filePath to pass as a reference, '
-      + 'or to choose a free spot on the canvas.',
+      + 'to choose a free spot on the canvas, or to reason about how existing elements depend on each other '
+      + '(e.g. "video B was generated from prompt A as first_frame + prompt C as last_frame — if B\'s opening is '
+      + 'bad I can reroll just A").',
     parameters: {},
     output: {
       schema: {
@@ -991,18 +1045,20 @@ export function registerTools(
               properties: {
                 source: { type: 'string', required: true },
                 target: { type: 'string', required: true },
+                relation: { type: 'string', required: true, enum: EDGE_RELATIONS as readonly string[], description: 'Semantic relation: why the source was wired to the target.' },
+                note: { type: 'string', description: 'Optional short note supplementing the relation.' },
               },
             },
           },
         },
       },
       render: (_args, value) => {
-        const v = value as { elements: Array<{ filePath: string; kind: string; title: string; x: number; y: number }>; edges: Array<{ source: string; target: string }> }
+        const v = value as { elements: Array<{ filePath: string; kind: string; title: string; x: number; y: number }>; edges: Array<{ source: string; target: string; relation: string }> }
         if (v.elements.length === 0) return [{ type: 'text', text: 'Canvas is empty for this session.' }]
         const lines = v.elements.map((el) => `  ${el.filePath}  [${el.kind}]  @(${el.x}, ${el.y})  "${el.title}"`)
         return [{
           type: 'text',
-          text: `Canvas (${v.elements.length} elements, ${v.edges.length} edges):\n${lines.join('\n')}\nEdges:\n${v.edges.map(e => `  ${e.source} → ${e.target}`).join('\n')}`,
+          text: `Canvas (${v.elements.length} elements, ${v.edges.length} edges):\n${lines.join('\n')}\nEdges:\n${v.edges.map(e => `  ${e.source} →[${e.relation}]→ ${e.target}`).join('\n')}`,
         }]
       },
     },

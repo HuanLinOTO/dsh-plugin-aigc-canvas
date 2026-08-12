@@ -30,6 +30,58 @@ import { AigcError } from './wire.js'
 /** Discriminated union of element kinds the canvas stores. */
 export type AigcElementKind = 'prompt' | 'image' | 'video' | 'audio'
 
+/**
+ * Semantic relation on an edge: WHY one element was wired to another.
+ *
+ * The 11 fixed enum values cover the common AIGC pipeline relationships
+ * (direct input, references, first/last frames, style, mask, audio
+ * tracks, variations/remixes/alternatives, and the ffmpeg edit chain).
+ *
+ * The relation drives:
+ *  - Agent reasoning: `aigc_canvas_list_elements` returns edges with
+ *    their `relation`, so the model can read the dependency graph.
+ *  - Client rendering: each relation maps to a line style + label
+ *    (solid/dashed/dotted + "首帧"/"风格" etc.), see CanvasView.renderEdge.
+ *
+ * Backward compat: edges loaded from old `canvas.json` files that predate
+ * the `relation` field are normalized to `'input'` on hydrate.
+ */
+export type EdgeRelation =
+  // Direct inputs (solid line)
+  | 'input'            // generic input (e.g. t2i prompt → image)
+  | 'first_frame'      // first-frame input to a video (fl2v)
+  | 'last_frame'       // last-frame input to a video (fl2v)
+  | 'audio_track'      // audio track added to a video
+  // References (dashed line)
+  | 'reference'        // generic reference (ref2v)
+  | 'style'            // style reference (i2i style transfer)
+  | 'mask'             // mask reference (local edit)
+  // Variations / alternatives (dotted line)
+  | 'variation_of'     // same prompt, different seed (reroll)
+  | 'remix_of'         // changed prompt (reroll with prompt_delta)
+  | 'alternative_of'   // A/B candidate within a variation cluster
+  // Edit chain (bold solid line)
+  | 'edited_from'      // ffmpeg edit chain (media_edit output → input)
+
+/** All EdgeRelation values as a readonly array (for schema enum + validation). */
+export const EDGE_RELATIONS: readonly EdgeRelation[] = [
+  'input', 'first_frame', 'last_frame', 'audio_track',
+  'reference', 'style', 'mask',
+  'variation_of', 'remix_of', 'alternative_of',
+  'edited_from',
+] as const
+
+/** Default relation when an old edge has none (backward compat). */
+export const DEFAULT_EDGE_RELATION: EdgeRelation = 'input'
+
+/** Coerce an unknown value to EdgeRelation, falling back to the default. */
+export function coerceEdgeRelation(value: unknown): EdgeRelation {
+  if (typeof value === 'string' && (EDGE_RELATIONS as readonly string[]).includes(value)) {
+    return value as EdgeRelation
+  }
+  return DEFAULT_EDGE_RELATION
+}
+
 /** File extension for each media kind (no leading dot). */
 export function extensionFor(kind: AigcElementKind): string {
   switch (kind) {
@@ -96,6 +148,23 @@ export interface AigcEdge {
   source: string
   /** Target element uuid (the produced output). */
   target: string
+  /**
+   * Semantic relation describing WHY source → target was wired (e.g.
+   * `first_frame` for a video's first-frame input, `style` for a style-
+   * reference, `variation_of` for a reroll). See EdgeRelation for the
+   * full enum.
+   *
+   * Edges loaded from old `canvas.json` files that predate this field
+   * are normalized to `'input'` on hydrate (see coerceEdgeRelation).
+   */
+  relation: EdgeRelation
+  /**
+   * Optional short note supplementing the relation (free text). Useful
+   * for edge cases the fixed enum doesn't cover, e.g. `relation: 'style'`
+   * + `note: 'cyberpunk neon'`. Not used for rendering decisions (the
+   * relation enum drives line style + label); shown only in detail views.
+   */
+  note?: string
 }
 
 /** The serializable canvas state for one session. */
@@ -162,8 +231,17 @@ export interface AigcCanvasService {
    * only the canvas registration is dropped.
    */
   deleteElement(sessionId: string, uuid: string): Promise<void>
-  /** Wire edges from each input uuid to the target uuid (multi-to-one). */
-  wireEdges(sessionId: string, inputUuids: readonly string[], targetUuid: string): Promise<void>
+  /**
+   * Wire edges from each input uuid to the target uuid (multi-to-one).
+   *
+   * Each input may carry an optional `relation` (defaults to `'input'`
+   * when omitted) and `note`. If an edge already exists between the
+   * same source → target, its `relation`/`note` are UPDATED in place
+   * rather than skipped — so re-linking a pair with a new relation
+   * (e.g. promoting an `'input'` to a `'first_frame'`) works as an
+   * update, not a no-op.
+   */
+  wireEdges(sessionId: string, inputs: readonly { uuid: string; relation?: EdgeRelation; note?: string }[], targetUuid: string): Promise<void>
   /** Remove one edge (source → target). Idempotent. */
   unlink(sessionId: string, sourceUuid: string, targetUuid: string): Promise<void>
   /** Load the persisted state for one session (idempotent; used before sync reads). */
@@ -427,7 +505,12 @@ export function createAigcCanvasService(
       }
       const edges = edgesOf(sessionId)
       for (const e of Array.isArray(parsed.edges) ? parsed.edges : []) {
-        if (e && typeof e.source === 'string' && typeof e.target === 'string') edges.push(e)
+        if (e && typeof e.source === 'string' && typeof e.target === 'string') {
+          // Backward compat: old canvas.json files predating EdgeRelation
+          // have no `relation` field — normalize to the default 'input'.
+          e.relation = coerceEdgeRelation(e.relation)
+          edges.push(e)
+        }
       }
       hydrated.add(sessionId)
       // Notify listeners so any connected WS client sees the loaded data.
@@ -606,19 +689,32 @@ export function createAigcCanvasService(
     notify(sessionId)
   }
 
-  const wireEdges: AigcCanvasService['wireEdges'] = async (sessionId, inputUuids, targetUuid) => {
+  const wireEdges: AigcCanvasService['wireEdges'] = async (sessionId, inputs, targetUuid) => {
     await hydrate(sessionId)
     const table = tableOf(sessionId)
     if (!table.has(targetUuid)) {
       throw new AigcError('not-found', `target element "${targetUuid}" not found in session "${sessionId}"`, 404)
     }
     const edges = edgesOf(sessionId)
-    for (const source of inputUuids) {
-      if (!table.has(source)) {
-        throw new AigcError('not-found', `source element "${source}" not found in session "${sessionId}"`, 404)
+    for (const input of inputs) {
+      if (!table.has(input.uuid)) {
+        throw new AigcError('not-found', `source element "${input.uuid}" not found in session "${sessionId}"`, 404)
       }
-      if (edges.some(e => e.source === source && e.target === targetUuid)) continue
-      edges.push({ source, target: targetUuid })
+      const relation = input.relation ?? DEFAULT_EDGE_RELATION
+      const existing = edges.find(e => e.source === input.uuid && e.target === targetUuid)
+      if (existing !== undefined) {
+        // Update relation + note in place so re-linking with a new relation
+        // (e.g. promoting 'input' → 'first_frame') works as an update.
+        existing.relation = relation
+        if (input.note !== undefined) existing.note = input.note
+      } else {
+        edges.push({
+          source: input.uuid,
+          target: targetUuid,
+          relation,
+          ...(input.note !== undefined ? { note: input.note } : {}),
+        })
+      }
     }
     await persist(sessionId)
     notify(sessionId)

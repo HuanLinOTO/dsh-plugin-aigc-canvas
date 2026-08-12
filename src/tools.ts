@@ -1,30 +1,35 @@
 /**
- * The seven model-facing AIGC canvas tools.
+ * The nine model-facing AIGC canvas tools.
  *
  * Generation is provider-agnostic:
- *   aigc_get_provider_info         — list configured providers (id, name,
- *                                    endpoint, usage instructions, stub flag).
- *                                    Call this FIRST. The provider apiKey is
- *                                    NEVER shown; it is attached automatically
- *                                    by aigc_http_request.
- *   aigc_http_request              — send an HTTP request to a provider's API
- *                                    (endpoint + apiKey auto-attached). Binary
- *                                    responses (image/video/audio) are saved
- *                                    to disk and returned as a filePath;
- *                                    JSON/text responses are returned inline
- *                                    (saved to a file when too large).
- *   aigc_provider_set_instructions — record the provider's 调用说明 (how to
- *                                    call the API: endpoints, params, auth)
- *                                    so future sessions can use the provider.
- *   aigc_canvas_place              — place a file (typically the filePath
- *                                    aigc_http_request returned) onto the free
- *                                    canvas at position (x, y); optionally
- *                                    records the prompt/params (shown on
- *                                    double-click) and auto-wires edges from
- *                                    reference elements.
- *   aigc_canvas_link / unlink      — create / remove an edge between two
- *                                    elements (filePath-addressed).
- *   aigc_canvas_list_elements      — snapshot of the session's canvas.
+ *   aigc_get_provider_info             — list configured providers (id, name,
+ *                                        endpoint, instructions PREVIEW, stub flag).
+ *                                        Call this FIRST. The provider apiKey is
+ *                                        NEVER shown; it is attached automatically
+ *                                        by aigc_http_request.
+ *   aigc_http_request                  — send an HTTP request to a provider's API
+ *                                        (endpoint + apiKey auto-attached). Binary
+ *                                        responses (image/video/audio) are saved
+ *                                        to disk and returned as a filePath;
+ *                                        JSON/text responses are returned inline
+ *                                        (saved to a file when too large).
+ *   aigc_provider_set_instructions     — record the provider's 调用说明 (how to
+ *                                        call the API: endpoints, params, auth)
+ *                                        so future sessions can use the provider.
+ *   aigc_provider_get_instructions     — fetch the FULL instructions for one
+ *                                        provider (aigc_get_provider_info only
+ *                                        shows a short preview).
+ *   aigc_canvas_place                  — place a file (typically the filePath
+ *                                        aigc_http_request returned) onto the free
+ *                                        canvas at position (x, y); optionally
+ *                                        records the prompt/params (shown on
+ *                                        double-click) and auto-wires edges from
+ *                                        reference elements.
+ *   aigc_canvas_link / unlink          — create / remove an edge between two
+ *                                        elements (filePath-addressed).
+ *   aigc_canvas_list_elements          — snapshot of the session's canvas.
+ *   aigc_media_edit                    — ffmpeg-based media editing (concat,
+ *                                        clip, extract_audio, etc.).
  *
  * Element identity:
  *   Every element (prompt / image / video / audio) is identified by its
@@ -116,6 +121,35 @@ export interface ProviderInfo {
   instructions: string
   isStub: boolean
   isDefault: boolean
+}
+
+/**
+ * Cap on how many characters of a provider's `instructions` are inlined
+ * into `aigc_get_provider_info` output. The full text is fetched on
+ * demand via `aigc_provider_get_instructions`. Picked to keep the
+ * provider list compact when there are many providers, while still
+ * giving the model enough to recognize an already-initialized provider.
+ */
+const INSTRUCTIONS_PREVIEW_CHARS = 200
+
+/**
+ * Maximum byte length of one provider's `instructions` string. Picked
+ * to fit a structured catalog for a multi-endpoint provider (t2i/t2v/
+ * tts/edit) without being so large that one verbose provider starves
+ * the rest of the context window.
+ */
+const INSTRUCTIONS_MAX_CHARS = 1000
+
+/** Build the `instructions` preview string + total char count for one provider. */
+function instructionsPreviewOf(instructions: string): { preview: string; totalChars: number } {
+  const totalChars = instructions.length
+  if (totalChars <= INSTRUCTIONS_PREVIEW_CHARS) {
+    return { preview: instructions, totalChars }
+  }
+  return {
+    preview: `${instructions.slice(0, INSTRUCTIONS_PREVIEW_CHARS)}… (${totalChars} chars total — call aigc_provider_get_instructions to read the full text)`,
+    totalChars,
+  }
 }
 
 /** File extension for one binary kind produced by the http tool. */
@@ -316,12 +350,16 @@ export function registerTools(
   register(defineTool({
     name: 'aigc_get_provider_info',
     description:
-      'List all configured AIGC providers with their id, name, endpoint, usage instructions, and stub status. '
+      'List all configured AIGC providers with their id, name, endpoint, an instructions PREVIEW, and stub status. '
       + 'Call this FIRST before generating anything. '
       + 'To use a provider: call aigc_http_request with its id as provider_id — the endpoint and apiKey are attached '
       + 'automatically, so you never need to see or forward the apiKey. '
-      + 'When a provider\'s instructions field is empty, probe its API yourself (aigc_http_request) and then record '
-      + 'how to call it via aigc_provider_set_instructions (KEEP THE INSTRUCTIONS AS SHORT AS POSSIBLE — see that tool). '
+      + 'When a provider\'s instructions are empty, probe its API yourself (aigc_http_request) and then record '
+      + 'how to call it via aigc_provider_set_instructions. '
+      + 'The `instructions` field shown here is a PREVIEW (first '
+      + `${INSTRUCTIONS_PREVIEW_CHARS} chars + total count) — when you need the full instructions `
+      + '(e.g. to recall exact endpoint paths / params for an already-initialized provider), call '
+      + 'aigc_provider_get_instructions with the provider_id. '
       + 'When the endpoint is "stub://aigc-backend", aigc_http_request returns synthetic media (no real API calls) — '
       + 'useful for dry runs. '
       + 'Generated files are placed on the canvas with aigc_canvas_place (filePath + position), and elements can be '
@@ -342,7 +380,8 @@ export function registerTools(
                 id: { type: 'string', required: true, description: 'The provider id (pass this as provider_id to aigc_http_request).' },
                 name: { type: 'string', required: true, description: 'The provider display name.' },
                 endpoint: { type: 'string', required: true, description: 'The provider API endpoint URL. "stub://aigc-backend" = the built-in stub.' },
-                instructions: { type: 'string', required: true, description: 'Free-form usage instructions for calling the provider API (empty until initialized).' },
+                instructions: { type: 'string', required: true, description: `Preview of the usage instructions (first ${INSTRUCTIONS_PREVIEW_CHARS} chars + total count). Call aigc_provider_get_instructions for the full text.` },
+                instructions_total_chars: { type: 'integer', required: true, description: 'Total character count of the full instructions (0 when uninitialized).' },
                 isStub: { type: 'boolean', required: true, description: 'Whether the stub backend is active (no real API calls).' },
                 isDefault: { type: 'boolean', required: true, description: 'Whether this is the default provider (used when provider_id is omitted).' },
               },
@@ -351,23 +390,36 @@ export function registerTools(
         },
       },
       render: (_args, value) => {
-        const v = value as { providers: Array<{ id: string; name: string; endpoint: string; instructions: string; isStub: boolean; isDefault: boolean }> }
+        const v = value as { providers: Array<{ id: string; name: string; endpoint: string; instructions: string; instructions_total_chars: number; isStub: boolean; isDefault: boolean }> }
         if (v.providers.length === 0) {
           return [{ type: 'text', text: 'No AIGC providers configured. Add one in the settings page.' }]
         }
         const lines = v.providers.map(p =>
           `  ${p.isDefault ? '* ' : '  '}${p.id}  "${p.name || '(unnamed)'}"  endpoint: ${p.endpoint}  stub: ${p.isStub}`
-          + (p.instructions !== '' ? `\n    instructions: ${p.instructions}` : '\n    instructions: (empty — probe the API with aigc_http_request, then record them via aigc_provider_set_instructions)'),
+          + (p.instructions !== '' ? `\n    instructions (${p.instructions_total_chars} chars): ${p.instructions}` : '\n    instructions: (empty — probe the API with aigc_http_request, then record them via aigc_provider_set_instructions)'),
         )
         return [{
           type: 'text',
-          text: `AIGC providers (${v.providers.length}):\n${lines.join('\n')}\n\nCall aigc_http_request with the desired provider's id; endpoint + apiKey are attached automatically.`,
+          text: `AIGC providers (${v.providers.length}):\n${lines.join('\n')}\n\nCall aigc_http_request with the desired provider's id; endpoint + apiKey are attached automatically. For full instructions of one provider, call aigc_provider_get_instructions.`,
         }]
       },
     },
     execute: async (_args, exec) => {
       exec.signal.throwIfAborted()
-      return Promise.resolve({ providers: listProviders() })
+      const list = listProviders()
+      const projected = list.map(p => {
+        const { preview, totalChars } = instructionsPreviewOf(p.instructions)
+        return {
+          id: p.id,
+          name: p.name,
+          endpoint: p.endpoint,
+          instructions: preview,
+          instructions_total_chars: totalChars,
+          isStub: p.isStub,
+          isDefault: p.isDefault,
+        }
+      })
+      return Promise.resolve({ providers: projected })
     },
   }))
 
@@ -620,20 +672,19 @@ export function registerTools(
       + 'and response shapes you discovered by probing the provider with aigc_http_request. '
       + 'Call this after initializing a provider so future sessions can generate with it directly. '
       + 'The instructions replace the provider\'s previous instructions (empty until first set). '
-      + 'CRITICAL: KEEP THE INSTRUCTIONS AS SHORT AS POSSIBLE — a few words per endpoint is enough. '
-      + 'Do NOT copy full API docs, examples, or verbose explanations. Prefer compact shorthand like '
-      + '"POST /v1/images/generations {prompt,size} -> {data:[{b64_json}]}" over full sentences. '
-      + 'Every byte here is inlined into aigc_get_provider_info output on every call, so verbosity directly '
-      + 'wastes context window. Aim for under 200 characters total.',
+      + `KEEP THE INSTRUCTIONS COMPACT (target: under ${INSTRUCTIONS_MAX_CHARS} chars) — they are inlined into `
+      + 'aigc_get_provider_info as a preview, so verbosity wastes context window on every provider list call. '
+      + 'Prefer compact shorthand like "POST /v1/images/generations {prompt,size} -> {data:[{b64_json}]}" over full sentences. '
+      + 'Do NOT copy full API docs or verbose explanations — drop formatting guarantees and use telegraphic notes '
+      + '(one line per endpoint, no Markdown).',
     parameters: {
       provider_id: { type: 'string', required: true, description: 'The provider id to update (from aigc_get_provider_info).' },
       instructions: {
         type: 'string',
         required: true,
-        description: 'Compact usage instructions. BE TERSE — a few words per endpoint is enough; do not pad with prose, examples, or full docs. '
-          + 'Drop any formatting guarantees (no need for valid JSON / Markdown / complete sentences). '
+        description: 'Compact usage instructions. Be terse — one line per endpoint is enough; do not pad with prose, examples, or full docs. '
           + 'Shorthand like "POST /v1/images/generations {prompt,size} -> {data:[{b64_json}]}" is ideal. '
-          + 'Target: under 200 chars. Fewer is better.',
+          + `Target: under ${INSTRUCTIONS_MAX_CHARS} chars total. Fewer is better.`,
       },
     },
     output: {
@@ -643,9 +694,10 @@ export function registerTools(
         properties: {
           ok: { type: 'boolean', required: true },
           provider_id: { type: 'string', required: true },
+          total_chars: { type: 'integer', required: true, description: 'Total character count of the saved instructions.' },
         },
       },
-      render: textRender((v: { provider_id: string }) => `Saved usage instructions for provider "${v.provider_id}".`),
+      render: textRender((v: { provider_id: string; total_chars: number }) => `Saved ${v.total_chars} chars of usage instructions for provider "${v.provider_id}".`),
     },
     execute: (args: { provider_id: string; instructions: string }) => {
       if (typeof args.provider_id !== 'string' || args.provider_id === '') {
@@ -654,10 +706,52 @@ export function registerTools(
       if (typeof args.instructions !== 'string' || args.instructions === '') {
         throw new AigcError('bad-request', 'instructions is required')
       }
+      if (args.instructions.length > INSTRUCTIONS_MAX_CHARS) {
+        throw new AigcError('bad-request', `instructions too long (${args.instructions.length} chars > ${INSTRUCTIONS_MAX_CHARS} limit). Compress to telegraphic one-line-per-endpoint shorthand.`)
+      }
       getProvider(args.provider_id) // throws for unknown ids
       const result = setInstructions(args.provider_id, args.instructions)
       if (!result.ok) throw new AigcError('bad-request', result.error ?? 'cannot save instructions')
-      return Promise.resolve({ ok: true, provider_id: args.provider_id })
+      return Promise.resolve({ ok: true, provider_id: args.provider_id, total_chars: args.instructions.length })
+    },
+  }))
+
+  // ══ aigc_provider_get_instructions ══════════════════════════════════════
+  register(defineTool({
+    name: 'aigc_provider_get_instructions',
+    description:
+      'Fetch the FULL usage instructions (调用说明) for one provider. '
+      + 'aigc_get_provider_info only shows a short preview (first '
+      + `${INSTRUCTIONS_PREVIEW_CHARS} chars); when you need the complete text — e.g. to recall exact `
+      + 'endpoint paths, parameter names, or response shapes for an already-initialized provider — call this. '
+      + 'The result is empty for a provider that has not been initialized yet (probe the API with '
+      + 'aigc_http_request first, then record the instructions via aigc_provider_set_instructions).',
+    parameters: {
+      provider_id: { type: 'string', required: true, description: 'The provider id (from aigc_get_provider_info).' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          provider_id: { type: 'string', required: true },
+          instructions: { type: 'string', required: true, description: 'The full usage instructions string (empty when the provider is uninitialized).' },
+          total_chars: { type: 'integer', required: true, description: 'Total character count of the instructions (0 when uninitialized).' },
+        },
+      },
+      render: textRender((v: { provider_id: string; instructions: string; total_chars: number }) =>
+        v.instructions === ''
+          ? `Provider "${v.provider_id}" has no instructions recorded yet. Probe its API with aigc_http_request, then save them via aigc_provider_set_instructions.`
+          : `Full instructions for provider "${v.provider_id}" (${v.total_chars} chars):\n${v.instructions}`,
+      ),
+    },
+    execute: (args: { provider_id: string }) => {
+      if (typeof args.provider_id !== 'string' || args.provider_id === '') {
+        throw new AigcError('bad-request', 'provider_id is required')
+      }
+      const provider = getProvider(args.provider_id) // throws for unknown ids
+      const instructions = provider.instructions
+      return Promise.resolve({ provider_id: args.provider_id, instructions, total_chars: instructions.length })
     },
   }))
 

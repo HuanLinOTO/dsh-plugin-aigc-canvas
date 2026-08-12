@@ -1,6 +1,8 @@
 # dsh-aigc-canvas
 
-> DSH 插件:一个节点-连线式的 AIGC 画布。向模型暴露文生图 / 文生视频 / 首尾帧生视频 / 多参考生视频 / 音频生成五类工具,生成的图片 / 视频 / 音频以及提示词都作为画布元素(uuid 寻址)存在,生成完成后自动按多对一(promise + 所有参考元素 → 输出)在画布上连线。
+> DSH 插件:provider-agnostic 的 AIGC HTTP 桥 + 自由画布 + ffmpeg 后处理。Agent 通过
+> `aigc_http_request` 调用任意 HTTP AIGC API(endpoint + apiKey 自动附加),生成的文件用
+> `aigc_canvas_place` 摆到无限画布上,可用 `aigc_media_edit` (ffmpeg) 后处理。
 
 ## 安装
 
@@ -20,50 +22,112 @@ dsh plugin --profile <profile> add github:dsh-external/dsh-aigc-canvas
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `baseURL` | string | `stub://aigc-backend` | AIGC 后端 API 地址。`stub://aigc-backend` = 内置 stub 后端(无网络,合成 PNG/MP4/MP3 字节)。其他值会触发 `backend-error` 等待未来实现 |
-| `apiKeyEnv` | credential-ref | `AIGC_API_KEY` | API key 的环境变量名 / 凭据引用。stub 后端不读 |
-| `requestTimeoutMs` | number | `60000` | 单次后端请求超时(ms) |
-| `mediaSizeLimit` | number | `104857600` (100 MiB) | 单个媒体文件大小上限(媒体路由校验) |
+| `providers` | `AigcProvider[]` | 见下 | 一个或多个 AIGC provider;第一个为默认。运行时可在设置页 CRUD |
+| `requestTimeoutMs` | number | `300000` (5 min) | 单次 provider 请求超时(ms) |
+| `mediaSizeLimit` | number | `104857600` (100 MiB) | 单个媒体文件大小上限(落盘校验) |
+
+### `AigcProvider` 字段
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `id` | string | 必填 | provider 标识符(小写字母+数字+连字符,字母开头)。作为 `provider_id` 传给工具 |
+| `name` | string | `''` | 显示名(如 "Volcano Engine") |
+| `endpoint` | string | `stub://aigc-backend` | API endpoint URL。`stub://aigc-backend` = 内置 stub 后端 |
+| `apiKey` | string | `''` | API key(仅内存;通过 GUI 或 cordis.yml 设置) |
+| `instructions` | string | `''` | Agent 通过 `aigc_get_provider_info` 读取的调用说明(预览)+ `aigc_provider_get_instructions` 读全量 |
+| `auth.scheme` | `'bearer'` \| `'header'` \| `'query'` | `'bearer'` | apiKey 附加方式 |
+| `auth.name` | string | `''` | `header` 方式的 header 名(默认 `x-api-key`)或 `query` 方式的参数名(默认 `api_key`) |
+| `builtin` | boolean | `false` | 是否是 seed 层内置 provider(仅 cordis.yml 标记) |
 
 ## 工具
 
-模型可见的六个工具,均在调用代理的会话作用域内执行(模型不需要传 `sessionId`):
+模型可见的九个工具,均在调用代理的会话作用域内执行(模型不需要传 `sessionId`):
 
-### `aigc_text_to_image`
+| 工具 | 用途 |
+|------|------|
+| `aigc_get_provider_info` | 列出所有 provider(id/name/endpoint/instructions 预览/stub 标志)。**最先调用** |
+| `aigc_http_request` | 向 provider API 发 HTTP 请求(endpoint + apiKey 自动附加)。二进制响应落盘返回 `file_path`,JSON/文本内联返回 |
+| `aigc_provider_set_instructions` | 探测 API 后记录 provider 的调用说明(每 provider 限 1000 字) |
+| `aigc_provider_get_instructions` | 拉取一个 provider 的完整 instructions(`aigc_get_provider_info` 只返回前 200 字预览) |
+| `aigc_canvas_place` | 把文件摆到画布上(可选 x/y,可自动布局;可附 references 自动连边) |
+| `aigc_canvas_link` / `aigc_canvas_unlink` | 创建/删除两个元素之间的边(filePath 寻址) |
+| `aigc_canvas_list_elements` | 只读:返回当前会话画布的完整快照(elements + edges) |
+| `aigc_media_edit` | ffmpeg 编辑(concat/clip/extract_audio/extract_frame/speed/resize/reverse/add_audio/images_to_video) |
 
-文生图。把 prompt 也作为 prompt 元素存入画布,生成图片作为 image 元素,自动连线 prompt → image。
+### `aigc_get_provider_info`
 
-参数:`prompt`(必填)、`negative_prompt`、`width`(默认 1024)、`height`(默认 1024)、`seed`。
+列出所有已配置的 provider。返回每个 provider 的 `id`、`name`、`endpoint`、`instructions`(前 200 字预览 + `instructions_total_chars`)、`isStub`、`isDefault`。
 
-### `aigc_text_to_video`
+参数:无。
 
-文生视频。同上,prompt 元素 → video 元素。
+### `aigc_http_request`
 
-参数:`prompt`(必填)、`negative_prompt`、`width`(默认 1280)、`height`(默认 720)、`duration_seconds`(默认 5)、`seed`。
+向 provider API 发送一个 HTTP 请求。provider 的 `endpoint` 和 `apiKey` 自动附加(Agent 永远看不到 apiKey)。`path` 相对 provider endpoint,如 `/v1/images/generations`;同源的绝对 URL 也接受(用于下载 provider 返回的下载链接)。
 
-### `aigc_first_last_frame_to_video`
+二进制响应(image/video/audio)落盘到会话 canvas 目录并返回 `file_path`;JSON/文本响应内联返回(过大时落盘并返回预览 + `file_path`)。非 2xx 响应返回 `{ ok: false, status, error, sent_body_preview }`,便于 Agent 自诊断字段丢失/编码 bug。
 
-首尾帧 + 文生视频。`first_frame_uuid` / `last_frame_uuid` 必须是已存在的 image 元素 uuid(由 `aigc_text_to_image` 返回)。prompt 元素 + 两个 image 元素都 → video 元素(三条边)。
+**`$base64` / `$data_uri` 占位符**:在 `json_body` 或 `body` 内使用 `{"$base64": "<file_path>"}` 或 `{"$data_uri": "<file_path>"}`,host 会读取画布元素文件并替换占位符。`file_path` 必须在会话 canvas 目录内。
 
-参数:`prompt`(必填)、`first_frame_uuid`(必填)、`last_frame_uuid`(必填)、`width`、`height`、`duration_seconds`、`seed`。
+参数:`provider_id?`、`method?`、`path`(必填)、`headers?`、`query?`、`json_body?` / `body?`(二选一)。
 
-### `aigc_multi_reference_to_video`
+### `aigc_provider_set_instructions`
 
-多参考生视频。`reference_uuids` 是 image / video / audio 元素的 uuid 数组(至少一个)。prompt 元素 + 所有参考元素都 → video 元素。
+记录一个 provider 的调用说明(endpoints、请求格式、参数、响应形状)。每 provider 限 1000 字。Agent 探测 API 后调用此工具持久化,后续会话可直接使用。
 
-参数:`prompt`(必填)、`reference_uuids`(必填,非空数组)、`width`、`height`、`duration_seconds`、`seed`。
+参数:`provider_id`(必填)、`instructions`(必填,≤ 1000 字)。
 
-### `aigc_generate_audio`
+### `aigc_provider_get_instructions`
 
-文本生成音频。prompt 元素 → audio 元素。
+拉取一个 provider 的**完整** instructions。`aigc_get_provider_info` 只返回前 200 字预览;当需要精确的 endpoint 路径/参数名/响应形状时调用此工具。
 
-参数:`prompt`(必填)、`duration_seconds`(默认 10)、`seed`。
+参数:`provider_id`(必填)。返回:`{ provider_id, instructions, total_chars }`。
+
+### `aigc_canvas_place`
+
+把文件摆到画布上(`aigc_http_request` 返回的 `file_path`)。文件必须已存在于会话 canvas 目录内。
+
+- `x` / `y` 可省略,**优先省略让 host 自动布局**:有 `references` 时新元素落到最右参考的右侧(垂直居中),否则落到现有最低元素下方的左对齐垂直列
+- `references` 是已有元素的 filePath 数组,自动从每个参考向新元素连边
+- `description` 是 ≤ 40 字的极简描述(名词/形容词/短语,如 "orange cat"),显示在卡片上
+
+参数:`file_path`(必填)、`description`(必填)、`x?`、`y?`、`title?`、`kind?`、`prompt?`、`meta?`、`references?`。
+
+### `aigc_canvas_link` / `aigc_canvas_unlink`
+
+创建/删除两个元素之间的边(filePath 寻址,source → target)。幂等。
+
+参数:`source`(必填)、`target`(必填)。
 
 ### `aigc_canvas_list_elements`
 
-只读:返回当前会话画布的完整快照(elements + edges)。用于长工具序列后恢复状态、查找要传给后续调用的 uuid。
+只读:返回当前会话画布的完整快照。每个元素返回 `filePath`(主标识符)、`kind`、`title`、`x`、`y`、`createdAt`、`producedBy`、可选 `promptText`/`mediaSize`/`meta`。每条边返回 `source` filePath → `target` filePath。
 
 参数:无。
+
+### `aigc_media_edit`
+
+通过 ffmpeg 编辑媒体文件。`operation` 选定操作,所有输入文件必须已存在于会话 canvas 目录内,输出落盘并返回 `file_path`。
+
+| 操作 | inputs | output_ext | 关键参数 |
+|------|--------|------------|---------|
+| `concat` | ≥ 2 视频 | mp4 | — |
+| `clip` | 1 视频 | mp4 | `start`/`end` 或 `start`/`duration`(秒) |
+| `extract_audio` | 1 视频 | mp3 | — |
+| `extract_frame` | 1 视频 | png | `timestamp`(秒) |
+| `speed` | 1 视频 | mp4 | `speed`(2 = 2x,0.5 = 半速) |
+| `resize` | 1 视频 | mp4 | `width` 和/或 `height`(像素) |
+| `reverse` | 1 视频 | mp4 | — |
+| `add_audio` | 1 视频 + 1 音频 | mp4 | — |
+| `images_to_video` | ≥ 1 图片 | mp4 | `fps`(默认 2) |
+
+**ffmpeg 查找顺序**:
+1. `AIGC_FFMPEG_PATH` 环境变量(显式覆盖,适用于非标准安装路径)
+2. `ffmpeg` on PATH(macOS/Linux 和大多数 Windows 的正常情况)
+3. 平台特定常见安装位置:
+   - **Windows**:`C:\ffmpeg\bin\ffmpeg.exe`、`C:\Program Files\ffmpeg\bin\ffmpeg.exe`、`C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe`、`${CONDA_PREFIX}\Scripts\ffmpeg.exe`
+   - **macOS/Linux**:`/usr/bin/ffmpeg`、`/usr/local/bin/ffmpeg`、`/opt/homebrew/bin/ffmpeg`
+
+找不到时抛 `backend-error`,错误信息指引安装方式。
 
 ## 画布视图
 
@@ -71,9 +135,9 @@ dsh plugin --profile <profile> add github:dsh-external/dsh-aigc-canvas
 
 - 通过 WebSocket `/aigc-canvas/ws/canvas?sessionId=...` 订阅 host 端的画布变更推送
 - 首次加载会先 HTTP `POST /aigc-canvas/api/canvas.list` priming 一次快照
-- 节点按 vertical flow 排列,每个节点的入边在节点上方以 chip 形式显示(短 uuid)
+- 节点按 vertical flow 排列,每个节点的入边在节点上方以 chip 形式显示
 - 不同 kind 用左侧色条区分:prompt 蓝 / image 绿 / video 橙 / audio 紫
-- WS 断开后 2 秒自动重连
+- WS 断开后自动重连
 
 > better-sidebar 未安装时,host 半的工具 + 元素表仍然正常工作,只是没有 UI 可视化(未来的 host-side 消费者可以通过 `ctx.aigcCanvas` 服务读取状态)。
 
@@ -91,17 +155,17 @@ dsh plugin --profile <profile> add github:dsh-external/dsh-aigc-canvas
 <cwd>/.dsh-aigc-canvas/<sessionId>/<uuid>.<ext>
 ```
 
-扩展名按 kind 决定:`prompt` → `.txt`(实际上 prompt 元素不写文件,只在 JSON 中存 `promptText`)、`image` → `.png`、`video` → `.mp4`、`audio` → `.mp3`。
+provider 列表持久化到 `~/.dsh/aigc-canvas/providers.json`(用户运行时 CRUD 后保留)。
 
-刷新浏览器 / 重启 DSH 后,会话画布从 `canvas.json` 重新水合,媒体文件保留在原位。
+刷新浏览器 / 重启 DSH 后,会话画布从 `canvas.json` 重新水合,媒体文件保留在原位;provider 列表从 `providers.json` 重新加载。
 
 ## 开发
 
 ```sh
 pnpm install          # 安装开发依赖(schemastery、typescript、vitest、tsdown)
 pnpm run typecheck    # tsc --noEmit 类型检查
-pnpm test             # vitest run 单元测试(canvas-registry / tools / wire)
-pnpm run build        # tsdown 构建 → lib/index.js + lib/invariant.js + lib/client.js
+pnpm test             # vitest run 单元测试(canvas-registry / tools / wire / provider-store)
+pnpm run build        # tsdown 构建 → lib/index.js + lib/invariant.js + lib/client.js + tsc -p tsconfig.build.json
 pnpm watch            # tsdown --watch(client bundle 热重建)
 ```
 
@@ -109,7 +173,7 @@ pnpm watch            # tsdown --watch(client bundle 热重建)
 - `lib/index.js` — host 入口(cordis 插件,提供 `ctx.aigcCanvas` 服务 + 路由 + 工具)
 - `lib/invariant.js` — 包级 invariant 伴生
 - `lib/client.js` — 浏览器 bundle(`window.__ModuleLoader__.load` 闭包工厂,id = `@dsh-external/dsh-aigc-canvas`)
-- `lib/index.d.ts` 等 — TypeScript 声明(由 `tsc -p tsconfig.json` 产出,不在 tsdown 流程内)
+- `lib/index.d.ts` 等 — TypeScript 声明(由 `tsc -p tsconfig.build.json` 产出)
 
 ## 目录结构
 
@@ -123,19 +187,23 @@ dsh-aigc-canvas/
 │   ├── wire.ts               # HTTP helpers + AigcError
 │   ├── trust-fence.ts        # Host 头信任围栏(从 better-sidebar 拷贝)
 │   ├── canvas-registry.ts    # 元素表 + 边 + 持久化(host-owned state)
-│   ├── aigc-backend.ts       # 抽象 AIGC 后端客户端(stub 实现)
-│   ├── tools.ts              # 6 个 defineTool
+│   ├── provider-http.ts      # 抽象 provider HTTP 客户端(stub + 真实 fetch)
+│   ├── provider-store.ts     # ProviderStore(CRUD + 持久化到 ~/.dsh/aigc-canvas/providers.json)
+│   ├── media-edit.ts         # ffmpeg 编辑引擎
+│   ├── tools.ts              # 9 个 defineTool
 │   ├── types.d.ts            # @deepseek-ai/dsh-tools + cordis 环境类型声明
 │   └── client/
 │       ├── index.tsx         # client 入口:注册 better-sidebar tab
 │       ├── CanvasView.tsx    # 画布主视图
 │       ├── CanvasNode.tsx    # 节点组件
+│       ├── SettingsPage.tsx  # provider 设置页
 │       ├── store.ts          # CanvasStore(WS 订阅 + useSyncExternalStore)
 │       ├── api.ts            # HTTP/WS 客户端
 │       ├── locales.ts        # i18n(zh/en)
 │       └── canvas.module.css # 画布样式
 ├── tests/
 │   ├── canvas-registry.spec.ts
+│   ├── provider-store.spec.ts
 │   ├── tools.spec.ts
 │   └── wire.spec.ts
 ├── cordis.patch.yml          # bundle 层:插入插件行
@@ -148,30 +216,15 @@ dsh-aigc-canvas/
 └── README.md
 ```
 
-## 后端实现路线(stub → 真实)
-
-当前 `aigc-backend.ts` 的 stub 在 `baseURL === 'stub://aigc-backend'`(或为空)时返回合成字节;其他 `baseURL` 立即抛 `backend-error`(HTTP 501)。
-
-要接入真实后端:
-
-1. 在 `aigc-backend.ts` 的每个 `generate*` 方法的 `!this.isStub` 分支里替换为真实 `fetch` 调用(参考 dsh-mineru 的 `MinerUClient`)。
-2. 后端 API 形状建议保持 `{ prompt, ..., signal } → { mediaBytes, meta }` 的统一契约,这样 `tools.ts` 不需要改动。
-3. 工具的参数 schema 已包含 `width / height / duration_seconds / seed` 等通用字段,后端可以选择性消费。
-4. 媒体格式: stub 用最小合法 PNG / ftyp-only MP4;真实后端返回的字节由 host 直接落盘 + 浏览器渲染,不需要转码。
-
 ## 安全边界
 
 - 路由受 Host 头信任围栏保护(与 `/api` 一致;`0.0.0.0` 部署时由 `dsh web` 启动器动态派生的 LAN IP 列表生效)
 - `/aigc-canvas/file` 仅限会话 canvas 目录内的媒体文件
+- `/aigc-canvas/api/*` JSON API 受同一 Host 头信任围栏保护
 - 工具执行绑定到调用代理的会话 id(`exec.agent.session.id`),模型不能跨会话读取 / 引用其他会话的元素
-- `apiKeyEnv` 通过 `ctx.get('credentials')` 懒解析,先于 `process.env`
-
-## 已知限制(v0.1 阶段)
-
-- 后端 stub,无真实 AIGC 调用
-- 画布视图是垂直 flow,不是真正的图布局(force-directed / DAG 布局待后续)
-- 边以 chip 形式标注在节点上方,没有 SVG 连线(避免引入 react-flow 等运行时依赖)
-- 元素不支持删除 / 编辑(只能通过删除 `canvas.json` + 重启会话来重置画布)
+- `aigc_http_request` 的 `path` 相对 provider endpoint;绝对 URL 仅限同源(防 SSRF)
+- `$base64` / `$data_uri` 占位符的 `file_path` 必须在会话 canvas 目录内
+- provider apiKey 永不出现在工具输出中;`aigc_http_request` 内部附加 auth header/param
 
 ## 规范符合性
 

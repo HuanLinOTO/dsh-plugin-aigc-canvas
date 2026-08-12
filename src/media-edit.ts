@@ -69,21 +69,65 @@ function assertWithinCanvas(dir: string, filePath: string): void {
   }
 }
 
-/** Locate the ffmpeg binary. Tries PATH first, then common Windows locations. */
+/** Common ffmpeg install locations per platform (used when PATH lookup fails). */
+const FFMPEG_PLATFORM_CANDIDATES: readonly string[] = process.platform === 'win32'
+  ? [
+      'C:\\ffmpeg\\bin\\ffmpeg.exe',
+      'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',
+      'C:\\Program Files (x86)\\ffmpeg\\bin\\ffmpeg.exe',
+      ...(process.env.CONDA_PREFIX ? [`${process.env.CONDA_PREFIX}\\Scripts\\ffmpeg.exe`] : []),
+    ]
+  : [
+      '/usr/bin/ffmpeg',
+      '/usr/local/bin/ffmpeg',
+      '/opt/homebrew/bin/ffmpeg',
+    ]
+
+/** Human-readable list of the candidate locations (for error messages). */
+function describeFfmpegCandidates(): string {
+  const env = process.env.AIGC_FFMPEG_PATH !== undefined ? `AIGC_FFMPEG_PATH env var, ` : ''
+  return `${env}PATH, or one of: ${FFMPEG_PLATFORM_CANDIDATES.join(', ')}`
+}
+
+/**
+ * Locate the ffmpeg binary. Resolution order:
+ *  1. `AIGC_FFMPEG_PATH` env var (explicit override; useful for non-standard installs).
+ *  2. `ffmpeg` on PATH (the normal case on macOS/Linux and most Windows setups).
+ *  3. Platform-specific common install locations (see FFMPEG_PLATFORM_CANDIDATES).
+ *
+ * Throws `AigcError('backend-error')` with an actionable message when no ffmpeg
+ * can be probed successfully.
+ */
 async function findFfmpeg(): Promise<string> {
-  // Check if ffmpeg is in PATH by running a quick probe.
+  // 1. Explicit env var override.
+  const envPath = process.env.AIGC_FFMPEG_PATH
+  if (envPath !== undefined && envPath !== '') {
+    try {
+      await runProcess(envPath, ['-version'], 5000)
+      return envPath
+    } catch {
+      throw new AigcError('backend-error', `AIGC_FFMPEG_PATH is set to "${envPath}" but ffmpeg could not be probed there. Unset the var or fix the path.`)
+    }
+  }
+  // 2. PATH lookup.
   try {
     await runProcess('ffmpeg', ['-version'], 5000)
     return 'ffmpeg'
   } catch {
-    // Fall back to known Windows location.
-    const fallback = 'D:\\Softwares\\ffmpeg\\bin\\ffmpeg.exe'
-    try {
-      await runProcess(fallback, ['-version'], 5000)
-      return fallback
-    } catch {
-      throw new AigcError('backend-error', 'ffmpeg not found in PATH or at the default location')
+    // 3. Common install locations per platform.
+    for (const candidate of FFMPEG_PLATFORM_CANDIDATES) {
+      try {
+        await runProcess(candidate, ['-version'], 5000)
+        return candidate
+      } catch {
+        // continue to next candidate
+      }
     }
+    throw new AigcError(
+      'backend-error',
+      'ffmpeg not found. Install ffmpeg (https://ffmpeg.org/download.html) and either: ' +
+      `set the ${describeFfmpegCandidates()}.`,
+    )
   }
 }
 

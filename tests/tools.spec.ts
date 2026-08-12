@@ -180,7 +180,7 @@ describe('registerTools (stub provider)', () => {
     await rm(cwd, { recursive: true, force: true })
   })
 
-  it('registers exactly eight tools', () => {
+  it('registers exactly nine tools', () => {
     expect(Array.from(ctx.registered.keys()).sort()).toEqual([
       'aigc_canvas_link',
       'aigc_canvas_list_elements',
@@ -189,20 +189,24 @@ describe('registerTools (stub provider)', () => {
       'aigc_get_provider_info',
       'aigc_http_request',
       'aigc_media_edit',
+      'aigc_provider_get_instructions',
       'aigc_provider_set_instructions',
     ])
   })
 
-  it('aigc_get_provider_info returns the provider list', async () => {
+  it('aigc_get_provider_info returns the provider list with an instructions preview', async () => {
     const tool = ctx.registered.get('aigc_get_provider_info')!
     const result = await tool.execute({}, execFor('s1')) as {
-      providers: Array<{ id: string; name: string; endpoint: string; instructions: string; isStub: boolean; isDefault: boolean }>
+      providers: Array<{ id: string; name: string; endpoint: string; instructions: string; instructions_total_chars: number; isStub: boolean; isDefault: boolean }>
     }
     expect(result.providers).toHaveLength(1)
     expect(result.providers[0]!.id).toBe('stub')
     expect(result.providers[0]!.isStub).toBe(true)
     expect(result.providers[0]!.endpoint).toBe('stub://aigc-backend')
     expect(result.providers[0]!.isDefault).toBe(true)
+    // The stub provider has empty instructions → preview is empty, totalChars = 0.
+    expect(result.providers[0]!.instructions).toBe('')
+    expect(result.providers[0]!.instructions_total_chars).toBe(0)
   })
 
   it('aigc_http_request saves a synthetic image for a stub POST and returns a filePath', async () => {
@@ -399,16 +403,74 @@ describe('registerTools (stub provider)', () => {
     await expect(tool.execute({ path: '/x', body: 'a', json_body: { a: 1 } }, execFor('s1'))).rejects.toThrow(AigcError)
   })
 
-  it('aigc_provider_set_instructions stores instructions and exposes them via aigc_get_provider_info', async () => {
+  it('aigc_provider_set_instructions stores instructions and exposes them via aigc_get_provider_info (preview)', async () => {
     const setTool = ctx.registered.get('aigc_provider_set_instructions')!
+    const short = 'POST /v1/images/generations with { prompt, size }; returns image/png bytes'
     const setResult = await setTool.execute({
       provider_id: 'stub',
-      instructions: 'POST /v1/images/generations with { prompt, size }; returns image/png bytes',
+      instructions: short,
     }, execFor('s1'))
-    expect(setResult).toEqual({ ok: true, provider_id: 'stub' })
+    expect(setResult).toEqual({ ok: true, provider_id: 'stub', total_chars: short.length })
     const infoTool = ctx.registered.get('aigc_get_provider_info')!
-    const info = await infoTool.execute({}, execFor('s1')) as { providers: Array<{ instructions: string }> }
-    expect(info.providers[0]!.instructions).toContain('/v1/images/generations')
+    const info = await infoTool.execute({}, execFor('s1')) as { providers: Array<{ instructions: string; instructions_total_chars: number }> }
+    // Short instructions fit within the preview window → preview == full text.
+    expect(info.providers[0]!.instructions).toBe(short)
+    expect(info.providers[0]!.instructions_total_chars).toBe(short.length)
+  })
+
+  it('aigc_provider_set_instructions truncates the preview when instructions exceed the preview cap', async () => {
+    const setTool = ctx.registered.get('aigc_provider_set_instructions')!
+    // Build a >200 char instructions string with a recognizable tail.
+    const head = 'POST /v1/images/generations { prompt, size } -> {data:[{b64_json}]}; '
+    const tail = 'TAIL_MARKER_HERE'
+    const filler = 'x'.repeat(220 - head.length - tail.length)
+    const long = head + filler + tail
+    expect(long.length).toBe(220)
+    const setResult = await setTool.execute({ provider_id: 'stub', instructions: long }, execFor('s1'))
+    expect(setResult).toMatchObject({ ok: true, total_chars: 220 })
+    const infoTool = ctx.registered.get('aigc_get_provider_info')!
+    const info = await infoTool.execute({}, execFor('s1')) as { providers: Array<{ instructions: string; instructions_total_chars: number }> }
+    // Preview is truncated — the tail must NOT appear in the preview, only the head.
+    expect(info.providers[0]!.instructions_total_chars).toBe(220)
+    expect(info.providers[0]!.instructions.startsWith(head)).toBe(true)
+    expect(info.providers[0]!.instructions).not.toContain(tail)
+    expect(info.providers[0]!.instructions).toContain('220 chars total')
+  })
+
+  it('aigc_provider_set_instructions rejects instructions over the 1000-char limit', async () => {
+    const setTool = ctx.registered.get('aigc_provider_set_instructions')!
+    const tooLong = 'x'.repeat(1001)
+    await expect(setTool.execute({ provider_id: 'stub', instructions: tooLong }, execFor('s1'))).rejects.toThrow(AigcError)
+  })
+
+  it('aigc_provider_get_instructions returns the full instructions for one provider', async () => {
+    const setTool = ctx.registered.get('aigc_provider_set_instructions')!
+    const long = 'HEAD: ' + 'y'.repeat(300) + ' :TAIL'
+    expect(long.length).toBeGreaterThan(200)
+    await setTool.execute({ provider_id: 'stub', instructions: long }, execFor('s1'))
+    const getTool = ctx.registered.get('aigc_provider_get_instructions')!
+    const result = await getTool.execute({ provider_id: 'stub' }, execFor('s1')) as {
+      provider_id: string; instructions: string; total_chars: number
+    }
+    expect(result.provider_id).toBe('stub')
+    expect(result.total_chars).toBe(long.length)
+    // The full text is returned — the tail marker must be present (it's stripped from the preview).
+    expect(result.instructions).toBe(long)
+    expect(result.instructions).toContain(':TAIL')
+  })
+
+  it('aigc_provider_get_instructions returns empty for an uninitialized provider', async () => {
+    const getTool = ctx.registered.get('aigc_provider_get_instructions')!
+    const result = await getTool.execute({ provider_id: 'stub' }, execFor('s1')) as {
+      instructions: string; total_chars: number
+    }
+    expect(result.instructions).toBe('')
+    expect(result.total_chars).toBe(0)
+  })
+
+  it('aigc_provider_get_instructions throws for unknown provider ids', async () => {
+    const tool = ctx.registered.get('aigc_provider_get_instructions')!
+    await expect(tool.execute({ provider_id: 'nope' }, execFor('s1'))).rejects.toThrow(AigcError)
   })
 
   it('aigc_provider_set_instructions throws for unknown provider ids', async () => {
@@ -738,8 +800,8 @@ describe('registerTools (stub provider)', () => {
     }
   })
 
-  it('dispose unregisters all eight tools', () => {
-    expect(ctx.registered.size).toBe(8)
+  it('dispose unregisters all nine tools', () => {
+    expect(ctx.registered.size).toBe(9)
     dispose()
     expect(ctx.registered.size).toBe(0)
   })

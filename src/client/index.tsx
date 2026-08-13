@@ -1,5 +1,5 @@
 /**
- * Client half of @dsh-external/dsh-aigc-canvas: registers
+ * Client half of @huanlin/dsh-plugin-aigc-canvas: registers
  *  (1) a better-sidebar tab (`aigc-canvas:main`) rendering the canvas view, and
  *  (2) a settings.section slot for the provider config page.
  *

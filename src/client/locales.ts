@@ -1,7 +1,7 @@
 /**
  * i18n dictionaries for the AIGC canvas plugin.
  *
- * @module @dsh-external/dsh-aigc-canvas/client/locales
+ * @module @huanlin/dsh-plugin-aigc-canvas/client/locales
  */
 
 export const NS = 'dsh-aigc-canvas' as const

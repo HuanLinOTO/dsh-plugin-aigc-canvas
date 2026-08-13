@@ -5,7 +5,7 @@
  * Dedup: same provider + path + body hash within dedupWindowMs returns the cached
  * filePath instead of re-calling the provider.
  *
- * @module @dsh-external/dsh-aigc-canvas/retry-dedup
+ * @module @huanlin/dsh-plugin-aigc-canvas/retry-dedup
  */
 import { createHash } from 'node:crypto'
 import type { ResolvedAigcProvider } from './config.js'

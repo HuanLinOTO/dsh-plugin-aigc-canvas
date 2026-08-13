@@ -7,7 +7,7 @@
  *
  * Per docs/product/03-provider-catalog.md §1-3.
  *
- * @module @dsh-external/dsh-aigc-canvas/endpoint-catalog
+ * @module @huanlin/dsh-plugin-aigc-canvas/endpoint-catalog
  */
 
 /**

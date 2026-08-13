@@ -24,7 +24,7 @@
  * The module is self-contained: every function loads/saves its template
  * file directly. Callers (tools) do not need to thread a store instance.
  *
- * @module @dsh-external/dsh-aigc-canvas/pipeline-templates
+ * @module @huanlin/dsh-plugin-aigc-canvas/pipeline-templates
  */
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'

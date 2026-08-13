@@ -26,7 +26,7 @@
  *    tool can patch structured fields (prompt / seed / size) without
  *    re-parsing.
  *
- * @module @dsh-external/dsh-aigc-canvas/request-snapshot
+ * @module @huanlin/dsh-plugin-aigc-canvas/request-snapshot
  */
 
 /**

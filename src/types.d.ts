@@ -157,7 +157,7 @@ declare module 'cordis' {
       register(definition: unknown): () => void
       schemas(): readonly { name: string; description: string }[]
     }
-    httpServer: {
+    webServer: {
       register(route: {
         kind: 'exact' | 'prefix'
         path: string

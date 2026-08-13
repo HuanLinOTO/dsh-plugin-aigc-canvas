@@ -7,7 +7,7 @@
  * (costPerCall) + response-parsed costs (OpenAI usage fields) when available.
  * Not from rule-based calculation (costPerPixel etc.) — too much maintenance.
  *
- * @module @dsh-external/dsh-aigc-canvas/cost-tracker
+ * @module @huanlin/dsh-plugin-aigc-canvas/cost-tracker
  */
 
 /** One provider's cost config (subset of ResolvedAigcProvider). */

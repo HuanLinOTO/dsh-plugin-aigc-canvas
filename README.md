@@ -11,7 +11,7 @@
 dsh plugin --profile <profile> add link:D:\Projects\deepseek-harness\dsh-aigc-canvas
 
 # 从 git 安装(发布到 dsh-external 组织后):
-dsh plugin --profile <profile> add github:dsh-external/dsh-aigc-canvas
+dsh plugin --profile <profile> add github:huanlinoto/dsh-plugin-aigc-canvas
 ```
 
 预构建 `lib/` 入库策略(含 `@deepseek-ai/*` private peer deps,必须预构建),`github:` 安装开箱即用,无需 `allowBuilds`。
@@ -178,7 +178,7 @@ pnpm watch            # tsdown --watch(client bundle 热重建)
 构建产物:
 - `lib/index.js` — host 入口(cordis 插件,提供 `ctx.aigcCanvas` 服务 + 路由 + 工具)
 - `lib/invariant.js` — 包级 invariant 伴生
-- `lib/client.js` — 浏览器 bundle(`window.__ModuleLoader__.load` 闭包工厂,id = `@dsh-external/dsh-aigc-canvas`)
+- `lib/client.js` — 浏览器 bundle(`window.__ModuleLoader__.load` 闭包工厂,id = `@huanlin/dsh-plugin-aigc-canvas`)
 - `lib/index.d.ts` 等 — TypeScript 声明(由 `tsc -p tsconfig.build.json` 产出)
 
 ## 目录结构

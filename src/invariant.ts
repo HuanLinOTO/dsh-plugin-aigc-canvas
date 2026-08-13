@@ -1,12 +1,12 @@
 /**
- * Package-owned invariant companion for `@dsh-external/dsh-aigc-canvas`.
- * @module @dsh-external/dsh-aigc-canvas/invariant
+ * Package-owned invariant companion for `@huanlin/dsh-plugin-aigc-canvas`.
+ * @module @huanlin/dsh-plugin-aigc-canvas/invariant
  */
 
 /* jscpd:ignore-start */
 import type { Context } from './context-types.js'
 
-const PACKAGE_NAME = '@dsh-external/dsh-aigc-canvas'
+const PACKAGE_NAME = '@huanlin/dsh-plugin-aigc-canvas'
 
 /** Cordis companion plugin name. */
 export const name = 'dsh-aigc-canvas-invariant'
@@ -16,7 +16,7 @@ export const inject = ['invariants']
 /**
  * No runtime invariant: the canvas owns no service state or event protocol
  * of its own beyond the registry's own assertions (uuid existence, kind
- * checks) — every route is mounted under the host's httpServer fence, the
+ * checks) — every route is mounted under the host's webServer fence, the
  * element table is exercised by the smoke spec, and the client view is a
  * pure projection of the host state.
  */

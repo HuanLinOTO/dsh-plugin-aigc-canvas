@@ -12,7 +12,7 @@
  * storage (see redactSecrets). The agent never sees the log directly — it's
  * surfaced only through the client UI via the /aigc-canvas/api/logs.* JSON API.
  *
- * @module @dsh-external/dsh-aigc-canvas/request-log
+ * @module @huanlin/dsh-plugin-aigc-canvas/request-log
  */
 import type { ResolvedAigcProvider } from './config.js'
 

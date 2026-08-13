@@ -15,7 +15,7 @@
  * instance through — they just call {@link promoteAsset} / {@link listAssets}
  * / {@link getAsset} / {@link removeAsset}.
  *
- * @module @dsh-external/dsh-aigc-canvas/asset-library
+ * @module @huanlin/dsh-plugin-aigc-canvas/asset-library
  */
 import { homedir } from 'node:os'
 import { dirname, join, extname, basename } from 'node:path'

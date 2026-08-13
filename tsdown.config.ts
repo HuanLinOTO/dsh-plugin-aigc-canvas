@@ -1,5 +1,5 @@
 /**
- * tsdown build for @dsh-external/dsh-aigc-canvas: the host-half lib
+ * tsdown build for @huanlin/dsh-plugin-aigc-canvas: the host-half lib
  * (lib/index.js + lib/invariant.js, ESM node) plus one browser client
  * bundle (lib/client.js, CJS closure factory).
  *
@@ -20,7 +20,7 @@ import type { UserConfig } from 'tsdown'
 const REPOSITORY_ROOT = fileURLToPath(new URL('.', import.meta.url))
 
 /** Bundle id (= package name; the client-modules compose keys on it). */
-const CLIENT_ID = '@dsh-external/dsh-aigc-canvas'
+const CLIENT_ID = '@huanlin/dsh-plugin-aigc-canvas'
 
 /** Module specifiers the web shell shares into the frozen module table. */
 const CLIENT_EXTERNALS = [
@@ -28,7 +28,7 @@ const CLIENT_EXTERNALS = [
   'react/jsx-runtime',
   'react-dom',
   'react-dom/client',
-  'cordis',
+  '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-client-runtime',
   '@deepseek-ai/dsh-client-runtime/client',
   '@deepseek-ai/dsh-client-ui-primitives',

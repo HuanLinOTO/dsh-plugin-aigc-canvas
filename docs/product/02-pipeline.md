@@ -579,7 +579,7 @@ T4: final_30s 出现在 with_audio 下方，连线标注"编辑自"
 - pipeline 状态持久化到 `<cwd>/.dsh-aigc-canvas/<sessionId>/pipelines/<pipeline_id>.json`
 - 复用现有 `aigc_http_request` 内部逻辑（不重复实现 provider 调用）
 - 复用现有 `aigc_media_edit` 的 ffmpeg 引擎
-- 通过 `ctx.tasks.start` 暴露为可观测任务
+- 通过 `ctx.jobs.start` 暴露为可观测任务
 
 ### 步骤执行抽象
 

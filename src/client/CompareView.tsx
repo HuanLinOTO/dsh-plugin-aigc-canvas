@@ -14,7 +14,7 @@
  * surface (z-index above the detail panel + log panel + toolbar). It
  * does NOT intercept canvas pointer events outside its own bounds.
  *
- * @module @dsh-external/dsh-aigc-canvas/client/CompareView
+ * @module @huanlin/dsh-plugin-aigc-canvas/client/CompareView
  */
 import { Component, createElement, useEffect, useState, type CSSProperties, type ErrorInfo, type ReactNode } from 'react'
 import type { AigcElement, ElementStatus } from './api.js'

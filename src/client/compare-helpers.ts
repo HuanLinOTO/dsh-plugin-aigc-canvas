@@ -14,7 +14,7 @@
  * These helpers tolerate missing keys, wrong types, and `meta` being
  * absent entirely — they return `undefined` so the UI can render "—".
  *
- * @module @dsh-external/dsh-aigc-canvas/client/compare-helpers
+ * @module @huanlin/dsh-plugin-aigc-canvas/client/compare-helpers
  */
 import type { AigcElement } from './api.js'
 

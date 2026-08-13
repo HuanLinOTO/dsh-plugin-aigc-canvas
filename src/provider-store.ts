@@ -5,7 +5,7 @@
  * `~/.dsh/aigc-canvas/providers.json` so restarts keep user-added
  * providers and instructions.
  *
- * @module @dsh-external/dsh-aigc-canvas/provider-store
+ * @module @huanlin/dsh-plugin-aigc-canvas/provider-store
  */
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'

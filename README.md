@@ -2,19 +2,21 @@
 
 # dsh-aigc-canvas
 
+[![npm version](https://img.shields.io/npm/v/@huanlin/dsh-plugin-aigc-canvas)](https://www.npmjs.com/package/@huanlin/dsh-plugin-aigc-canvas)
+
 > DSH 插件:一个节点-连线式的 AIGC 画布。向模型暴露文生图 / 文生视频 / 首尾帧生视频 / 多参考生视频 / 音频生成五类工具,生成的图片 / 视频 / 音频以及提示词都作为画布元素(uuid 寻址)存在,生成完成后自动按多对一(promise + 所有参考元素 → 输出)在画布上连线。
 
 ## 安装
 
 ```sh
-# 从本地 clone 开发安装(开发阶段推荐):
-dsh plugin --profile <profile> add link:D:\Projects\deepseek-harness\dsh-aigc-canvas
+# 从 npm 安装(推荐):
+dsh plugin --profile web add @huanlin/dsh-plugin-aigc-canvas
 
-# 从 git 安装(发布到 dsh-external 组织后):
-dsh plugin --profile <profile> add github:dsh-external/dsh-aigc-canvas
+# 从本地 clone 开发安装(开发阶段):
+dsh plugin --profile web add link:D:\Projects\deepseek-harness\dsh-aigc-canvas
 ```
 
-预构建 `lib/` 入库策略(含 `@deepseek-ai/*` private peer deps,必须预构建),`github:` 安装开箱即用,无需 `allowBuilds`。
+预构建 `lib/` 入库策略(含 `@deepseek-ai/*` private peer deps,必须预构建),npm 安装开箱即用,无需 `allowBuilds`。
 
 ## 配置
 

@@ -1,8 +1,7 @@
 {
-  "name": "@dsh-external/dsh-aigc-canvas",
-  "version": "0.1.0",
+  "name": "@huanlin/dsh-plugin-aigc-canvas",
+  "version": "0.1.1",
   "description": "DSH plugin: an infinite free canvas for the better-sidebar plus provider-agnostic generation. Exposes aigc_get_provider_info / aigc_http_request (endpoint + apiKey auto-attached) / aigc_provider_set_instructions / aigc_canvas_place / aigc_canvas_link / aigc_canvas_unlink / aigc_canvas_list_elements tools; generated files are placed at arbitrary canvas positions and can be double-clicked for prompt + params.",
-  "private": true,
   "type": "module",
   "license": "MIT",
   "main": "./lib/index.js",
@@ -56,8 +55,7 @@
     "test:watch": "vitest",
     "build": "tsdown --config tsdown.config.ts && tsc -p tsconfig.build.json",
     "bundle:client": "tsdown --config tsdown.config.ts",
-    "watch": "tsdown --config tsdown.config.ts --watch",
-    "prepare": "tsdown --config tsdown.prepare.config.ts"
+    "watch": "tsdown --config tsdown.config.ts --watch"
   },
   "dependencies": {
     "schemastery": "^3.18.0",

@@ -4,10 +4,10 @@
  * outside the DSH monorepo's single cordis instance, so the upstream
  * `declare module 'cordis'` augmentations do not reach this Context — and
  * the npm cordis package does not declare the DSH-vendored runtime members
- * (`ctx.effect`, the httpServer/sessions/loader faces). The members below
+ * (`ctx.effect`, the webServer/sessions/loader faces). The members below
  * mirror the actual runtime shapes this plugin touches:
  *
- * - httpServer: @deepseek-ai/dsh-host-webserver
+ * - webServer: @deepseek-ai/dsh-host-webserver
  * - sessions:   @deepseek-ai/dsh-session (host side)
  * - loader:     @cordisjs/plugin-loader (entry options)
  * - invariants: @deepseek-ai/dsh-invariants
@@ -33,8 +33,8 @@ export interface AigcWebUpgradeRoute {
   handler: (req: IncomingMessage, socket: Duplex, head: Buffer) => void | Promise<void>
 }
 
-/** The httpServer service face this plugin uses. */
-export interface AigcHttpServer {
+/** The webServer service face this plugin uses. */
+export interface AigcWebServer {
   register(route: AigcWebRoute): () => void
   registerUpgrade(route: AigcWebUpgradeRoute): () => void
 }
@@ -110,7 +110,7 @@ export interface AigcToolsService {
 
 declare module 'cordis' {
   interface Context {
-    httpServer: AigcHttpServer
+    webServer: AigcWebServer
     sessions: AigcSessionStore
     agents: AigcAgentRegistry
     loader: AigcLoader

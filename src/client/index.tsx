@@ -1,5 +1,5 @@
 /**
- * Client half of @dsh-external/dsh-aigc-canvas: registers
+ * Client half of @huanlin/dsh-plugin-aigc-canvas: registers
  *  (1) a better-sidebar tab (`aigc-canvas:main`) rendering the canvas view, and
  *  (2) a settings.section slot for the provider config page.
  *
@@ -25,6 +25,7 @@ import { CanvasStore } from './store.js'
 import { CanvasViewWithBoundary } from './CanvasView.js'
 import { SettingsPage, type AigcSettingsInjected } from './SettingsPage.js'
 import { en, zh, NS, type AigcKey } from './locales.js'
+import { dicts } from './dictionaries.js'
 
 /** Locale namespace map declaration for the DSH locale system. */
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -33,18 +34,32 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
-/** Services required before mounting. */
-export const inject = ['betterSidebar', 'slots', 'locale', 'conversation']
+/** Services required before mounting. `betterSidebar` is intentionally NOT
+ *  listed here — this plugin extends `dsh-better-sidebar` when present, but
+ *  must remain loadable without it (defensive lookup via `ctx.get(...)`). */
+export const inject = ['slots', 'locale', 'conversation']
 
 export function apply(ctx: ClientContext): void {
   // ── Locale registration ────────────────────────────────────────────────
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-aigc-canvas: dictionaries')
+  // better-locale override dicts (optional — only when dsh-plugin-better-locale
+  // is loaded): register the 19-language dictionary while the DSH active locale
+  // is 'en'. Structurally typed; no runtime dep on the plugin.
+  type BetterLocaleRegistry = {
+    register(ns: string, dicts: Record<string, Record<string, string>>): () => void
+  }
+  const betterLocale = ctx.get('betterLocale') as BetterLocaleRegistry | undefined
+  if (betterLocale !== undefined) {
+    ctx.effect(() =>
+      betterLocale.register(NS, dicts),
+      'dsh-aigc-canvas: better-locale override dicts',
+    )
+  }
   const t = ctx.locale.bind(NS) as (key: string) => string
 
-  // ── better-sidebar tab ──────────────────────────────────────────────────
-  const betterSidebar = (ctx as unknown as {
-    betterSidebar?: { registerTab(descriptor: unknown): () => void }
-  }).betterSidebar
+  // ── better-sidebar tab (optional — only when dsh-better-sidebar is loaded) ──
+  type BetterSidebarService = { registerTab(descriptor: unknown): () => void }
+  const betterSidebar = ctx.get('betterSidebar') as BetterSidebarService | undefined
   if (betterSidebar !== undefined) {
     ctx.effect(() =>
       betterSidebar.registerTab({

@@ -4,7 +4,7 @@
  * endpoint / apiKey / instructions), editable at runtime through the DSH
  * GUI settings page; cordis.yml `config:` is the first-boot seed only.
  *
- * @module @dsh-external/dsh-aigc-canvas/config
+ * @module @huanlin/dsh-plugin-aigc-canvas/config
  */
 import z from 'schemastery';
 /** Provider id pattern: lowercase letters, digits, hyphens; must start with a letter. */

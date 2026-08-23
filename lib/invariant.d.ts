@@ -1,6 +1,6 @@
 /**
- * Package-owned invariant companion for `@dsh-external/dsh-aigc-canvas`.
- * @module @dsh-external/dsh-aigc-canvas/invariant
+ * Package-owned invariant companion for `@huanlin/dsh-plugin-aigc-canvas`.
+ * @module @huanlin/dsh-plugin-aigc-canvas/invariant
  */
 import type { Context } from './context-types.js';
 /** Cordis companion plugin name. */

@@ -1,5 +1,5 @@
 /**
- * @dsh-external/dsh-aigc-canvas host half: the canvas registry, the provider
+ * @huanlin/dsh-plugin-aigc-canvas host half: the canvas registry, the provider
  * store (config + per-provider usage instructions), the fenced
  * `/aigc-canvas/api/*` JSON API (provider CRUD + canvas.list/move) +
  * `/aigc-canvas/file` media route + `/aigc-canvas/ws/canvas` push WebSocket,
@@ -58,7 +58,7 @@ export type {
 export const name = 'dsh-aigc-canvas'
 
 /** Services required before mounting. */
-export const inject = ['httpServer', 'sessions', 'agents', 'loader', 'tools']
+export const inject = ['webServer', 'sessions', 'agents', 'loader', 'tools']
 
 /** The connection row's resolved trustedHosts (live read). */
 function trustedHostsOf(ctx: Context): string[] {
@@ -303,7 +303,7 @@ export function apply(ctx: Context, config?: AigcCanvasConfig): void {
   const api = buildApi(ctx, canvas, store, getResolved)
 
   // ── JSON API ────────────────────────────────────────────────────────────
-  ctx.effect(() => ctx.httpServer.register({
+  ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: '/aigc-canvas/api',
     handler: async (req, res) => {
@@ -335,7 +335,7 @@ export function apply(ctx: Context, config?: AigcCanvasConfig): void {
   }), 'dsh-aigc-canvas: /aigc-canvas/api routes')
 
   // ── Media route ─────────────────────────────────────────────────────────
-  ctx.effect(() => ctx.httpServer.register({
+  ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: '/aigc-canvas/file',
     handler: async (req, res) => {
@@ -384,7 +384,7 @@ export function apply(ctx: Context, config?: AigcCanvasConfig): void {
 
   // ── Canvas push WebSocket ───────────────────────────────────────────────
   const wss = new WebSocketServer({ noServer: true })
-  ctx.effect(() => ctx.httpServer.registerUpgrade({
+  ctx.effect(() => ctx.webServer.registerUpgrade({
     path: '/aigc-canvas/ws/canvas',
     handler: (req, socket, head) => {
       if (!fence(req)) {

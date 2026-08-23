@@ -20,7 +20,7 @@
  * (bearer / custom header / query param) the aigc_http_request tool uses to
  * attach the apiKey.
  *
- * @module @dsh-external/dsh-aigc-canvas/client/SettingsPage
+ * @module @huanlin/dsh-plugin-aigc-canvas/client/SettingsPage
  */
 
 import { useCallback, useEffect, useState } from 'react'

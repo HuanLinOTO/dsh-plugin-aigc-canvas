@@ -45,16 +45,28 @@ export function apply(ctx: ClientContext): void {
   // better-locale override dicts (optional — only when dsh-plugin-better-locale
   // is loaded): register the 19-language dictionary while the DSH active locale
   // is 'en'. Structurally typed; no runtime dep on the plugin.
+  // Activation-order-safe: re-check ctx.get('betterLocale') on every locale
+  // revision bump (better-locale bumps on activation + override switch).
   type BetterLocaleRegistry = {
     register(ns: string, dicts: Record<string, Record<string, string>>): () => void
   }
-  const betterLocale = ctx.get('betterLocale') as BetterLocaleRegistry | undefined
-  if (betterLocale !== undefined) {
-    ctx.effect(() =>
-      betterLocale.register(NS, dicts),
-      'dsh-aigc-canvas: better-locale override dicts',
-    )
-  }
+  ctx.effect(() => {
+    let dispose: (() => void) | undefined
+    const sync = (): void => {
+      dispose?.()
+      dispose = undefined
+      const store = ctx.get('betterLocale') as BetterLocaleRegistry | undefined
+      if (store !== undefined) {
+        dispose = store.register(NS, dicts)
+      }
+    }
+    sync()
+    const unsubscribe = ctx.locale.subscribe(sync)
+    return () => {
+      unsubscribe()
+      dispose?.()
+    }
+  }, 'dsh-aigc-canvas: better-locale override dicts')
   const t = ctx.locale.bind(NS) as (key: string) => string
 
   // ── better-sidebar tab (optional — only when dsh-better-sidebar is loaded) ──

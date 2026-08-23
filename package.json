@@ -1,6 +1,6 @@
 {
   "name": "@huanlin/dsh-plugin-aigc-canvas",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "DSH plugin: an infinite free canvas for the better-sidebar plus provider-agnostic generation. Exposes aigc_get_provider_info / aigc_http_request (endpoint + apiKey auto-attached) / aigc_provider_set_instructions / aigc_canvas_place / aigc_canvas_link / aigc_canvas_unlink / aigc_canvas_list_elements tools; generated files are placed at arbitrary canvas positions and can be double-clicked for prompt + params.",
   "type": "module",
   "license": "MIT",
@@ -78,20 +78,48 @@
     "react-dom": "^18.2.0"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-client-locale": { "optional": true },
-    "@deepseek-ai/dsh-client-runtime": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-primitives": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-settings": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-conversation": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-slots": { "optional": true },
-    "@deepseek-ai/dsh-host-webserver": { "optional": true },
-    "@deepseek-ai/dsh-invariants": { "optional": true },
-    "@deepseek-ai/dsh-session": { "optional": true },
-    "@deepseek-ai/dsh-tools": { "optional": true },
-    "cordis": { "optional": true },
-    "dsh-better-sidebar": { "optional": true },
-    "react": { "optional": true },
-    "react-dom": { "optional": true }
+    "@deepseek-ai/dsh-client-locale": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-runtime": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-primitives": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-settings": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-conversation": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-slots": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-host-webserver": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-invariants": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "cordis": {
+      "optional": true
+    },
+    "dsh-better-sidebar": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@deepseek-ai/dsh-client-locale": "link:C:/Users/Administrator/.dsh/source/current/packages/client/locale",

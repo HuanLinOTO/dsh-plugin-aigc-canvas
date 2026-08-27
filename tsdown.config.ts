@@ -22,15 +22,14 @@ const REPOSITORY_ROOT = fileURLToPath(new URL('.', import.meta.url))
 /** Bundle id (= package name; the client-modules compose keys on it). */
 const CLIENT_ID = '@huanlin/dsh-plugin-aigc-canvas'
 
-/** Module specifiers the web shell shares into the frozen module table. */
+/** Module specifiers the web shell shares into the frozen module table
+ *  (mirror of dsh web `PLATFORM_MODULES`; `/client` aliases the package row). */
 const CLIENT_EXTERNALS = [
   'react',
   'react/jsx-runtime',
   'react-dom',
   'react-dom/client',
-  'cordis',
-  '@deepseek-ai/dsh-client-runtime',
-  '@deepseek-ai/dsh-client-runtime/client',
+  '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-client-ui-primitives',
   '@deepseek-ai/dsh-client-ui-primitives/client',
   '@deepseek-ai/dsh-client-ui-slots',

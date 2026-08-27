@@ -201,6 +201,7 @@ export function SettingsPage({ t, send }: SettingsPageProps) {
         open={confirmDelete !== undefined}
         onClose={() => { setConfirmDelete(undefined) }}
         title={t('row.deleteConfirm')}
+        closeLabel={t('row.close')}
         footer={(
           <>
             <button type="button" className={css.secondaryButton} onClick={() => { setConfirmDelete(undefined) }}>

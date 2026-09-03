@@ -1,6 +1,6 @@
 /**
  * tsdown build for @huanlin/dsh-plugin-aigc-canvas: the host-half lib
- * (lib/index.js + lib/invariant.js, ESM node) plus one browser client
+ * (lib/index.js, ESM node) plus one browser client
  * bundle (lib/client.js, CJS closure factory).
  *
  * The client bundle replicates the official DSH client-bundle preset
@@ -84,13 +84,13 @@ function browserSourcePath(source: string, sourcemapPath: string): string {
   return `../../../${repositoryPath}`
 }
 
-/** The host-half build (lib/index.js + lib/invariant.js, ESM node).
+/** The host-half build (lib/index.js, ESM node).
  * Type declarations ship from a separate `tsc -p tsconfig.build.json` pass
  * (mirrors dsh-better-sidebar's build flow) so the dts chunking does not
  * produce hash-named cross-file imports that consumers cannot resolve.
  */
 const hostConfig: UserConfig = {
-  entry: { index: 'src/index.ts', invariant: 'src/invariant.ts' },
+  entry: { index: 'src/index.ts' },
   outDir: 'lib',
   format: ['esm'],
   platform: 'node',

@@ -190,12 +190,6 @@ declare module 'cordis' {
     loader: {
       entries(): Iterable<{ options: { name: string; config?: unknown } }>
     }
-    invariants: {
-      register(
-        packageName: string,
-        installer: (ctx: Context, fail: (message: string) => never) => void | Promise<void>,
-      ): () => void
-    }
     get(name: string): unknown
     /** Publish a service value onto the context (DSH-vendored cordis). */
     provide(name: string, value: unknown): void

@@ -72,7 +72,7 @@ function browserSourcePath(source: string, sourcemapPath: string): string {
 }
 
 const hostConfig: UserConfig = {
-  entry: ['src/index.ts', 'src/invariant.ts'],
+  entry: ['src/index.ts'],
   outDir: 'lib',
   format: ['esm'],
   platform: 'node',

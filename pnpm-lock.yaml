@@ -39,9 +39,6 @@ importers:
       '@deepseek-ai/dsh-host-webserver':
         specifier: link:C:/Users/Administrator/.dsh/source/current/packages/host/webserver
         version: link:C:/Users/Administrator/.dsh/source/current/packages/host/webserver
-      '@deepseek-ai/dsh-invariants':
-        specifier: link:C:/Users/Administrator/.dsh/source/current/packages/runtime-diagnostics/invariants
-        version: link:C:/Users/Administrator/.dsh/source/current/packages/runtime-diagnostics/invariants
       '@deepseek-ai/dsh-session':
         specifier: link:C:/Users/Administrator/.dsh/source/current/packages/core/session
         version: link:C:/Users/Administrator/.dsh/source/current/packages/core/session

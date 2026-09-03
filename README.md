@@ -107,15 +107,18 @@ dsh plugin --profile web add link:D:\Projects\deepseek-harness\dsh-aigc-canvas
 pnpm install          # 安装开发依赖(schemastery、typescript、vitest、tsdown)
 pnpm run typecheck    # tsc --noEmit 类型检查
 pnpm test             # vitest run 单元测试(canvas-registry / tools / wire)
-pnpm run build        # tsdown 构建 → lib/index.js + lib/invariant.js + lib/client.js
+pnpm run build        # tsdown 构建 → lib/index.js + lib/client.js
 pnpm watch            # tsdown --watch(client bundle 热重建)
 ```
 
 构建产物:
 - `lib/index.js` — host 入口(cordis 插件,提供 `ctx.aigcCanvas` 服务 + 路由 + 工具)
-- `lib/invariant.js` — 包级 invariant 伴生
 - `lib/client.js` — 浏览器 bundle(`window.__ModuleLoader__.load` 闭包工厂,id = `@dsh-external/dsh-aigc-canvas`)
 - `lib/index.d.ts` 等 — TypeScript 声明(由 `tsc -p tsconfig.json` 产出,不在 tsdown 流程内)
+
+> **不发布 `./invariant`**:本插件无独立可分歧的运行时观察(路由全部处于 host webServer
+> 信任围栏之下,元素表由 smoke spec 覆盖,client 视图是 host 状态的纯投影),按 DSH
+> v0.1.2-rc.1 收紧后的 invariant 规则不再发布空 invariant 伴生,在此记录原因。
 
 ## 目录结构
 
@@ -125,7 +128,6 @@ dsh-aigc-canvas/
 │   ├── index.ts              # host 入口:apply + /aigc-canvas/api + /aigc-canvas/file + WS
 │   ├── config.ts             # Schemastery Config schema + resolveAigcConfig
 │   ├── context-types.ts      # cordis Context augmentation(结构化镜像)
-│   ├── invariant.ts          # 包级 invariant 伴生
 │   ├── wire.ts               # HTTP helpers + AigcError
 │   ├── trust-fence.ts        # Host 头信任围栏(从 better-sidebar 拷贝)
 │   ├── canvas-registry.ts    # 元素表 + 边 + 持久化(host-owned state)
@@ -184,7 +186,7 @@ dsh-aigc-canvas/
 按 DSH 官方插件规范组织(参考 [dsh-external/turtle-ui](https://github.com/dsh-external/turtle-ui) 与 `plugin-development-guide.md`):
 
 - **插件形态**: `export const name / inject / Config / apply`,无 default 导出
-- **清单**: `types` + `exports`(`.` / `./invariant` / `./client` / `./client/service` / `./package.json`)、`dsh.bundle.patch`、`peerDependencies`、`engines`、`files` 产物明细、`prepare`(消费者侧 `tsdown`,git 安装可用)
-- **client 契约**: 仅导出 `apply`/`inject`(+ 类型);store 为 `CanvasStore` 工厂,实例归 `apply` 所有;`src/invariant.ts` 伴生;client bundle 复刻官方 preset(externals = 平台模块表 + runtime/client 豁免、纯度门、CSS Modules 内联)
+- **清单**: `types` + `exports`(`.` / `./client` / `./client/service` / `./package.json`)、`dsh.bundle.patch`、`peerDependencies`、`engines`、`files` 产物明细、`prepare`(消费者侧 `tsdown`,git 安装可用)
+- **client 契约**: 仅导出 `apply`/`inject`(+ 类型);store 为 `CanvasStore` 工厂,实例归 `apply` 所有;client bundle 复刻官方 preset(externals = 平台模块表 + runtime/client 豁免、纯度门、CSS Modules 内联)
 - **预构建 `lib/` 入库**: 含 `@deepseek-ai/*` private peer,必须预构建;`lib/` 不进 `.gitignore`;`github:` 安装开箱即用
 - **零源码 patch**: 未修改 DSH checkout 任何文件

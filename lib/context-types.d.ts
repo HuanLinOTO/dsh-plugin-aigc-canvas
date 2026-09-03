@@ -10,7 +10,6 @@
  * - webServer: @deepseek-ai/dsh-host-webserver
  * - sessions:   @deepseek-ai/dsh-session (host side)
  * - loader:     @cordisjs/plugin-loader (entry options)
- * - invariants: @deepseek-ai/dsh-invariants
  * - effect:     the DSH-vendored cordis lifecycle helper
  *
  * Drift from upstream is contained to this file.
@@ -85,12 +84,8 @@ export interface AigcLoaderEntry {
 export interface AigcLoader {
     entries(): Iterable<AigcLoaderEntry>;
 }
-/** The invariants service face (mirror of @deepseek-ai/dsh-invariants). */
-export interface AigcInvariantsService {
-    register(packageName: string, installer: (ctx: Context, fail: (message: string) => never) => void | Promise<void>): () => void;
-}
 /**
- * The invariant service face restated (mirror of @deepseek-ai/dsh-invariants).
+ * The tools service face restated.
  * Mirrored here exactly like better-sidebar does — the dual-cordis-instance
  * resolution otherwise hides the upstream augmentation. The `tools` service
  * face is declared in `./types.d.ts` (the ambient cordis module augmentation)
@@ -106,7 +101,6 @@ declare module 'cordis' {
         sessions: AigcSessionStore;
         agents: AigcAgentRegistry;
         loader: AigcLoader;
-        invariants: AigcInvariantsService;
         /**
          * The host-side AIGC canvas registry: holds the per-session element
          * table (prompts + generated assets) and edges. Provided by the host

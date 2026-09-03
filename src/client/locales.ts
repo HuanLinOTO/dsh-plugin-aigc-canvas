@@ -68,6 +68,7 @@ export type AigcKey =
   | 'row.collapse'
   | 'row.create'
   | 'row.cancel'
+  | 'row.close'
   | 'row.init'
   | 'row.initPrompt'
   | 'row.auth'
@@ -139,6 +140,7 @@ export const zh: Record<AigcKey, string> = {
   'row.collapse': '收起',
   'row.create': '创建',
   'row.cancel': '取消',
+  'row.close': '关闭',
   'row.init': '初始化',
   'row.initPrompt': '请帮我初始化 AIGC 供应商「{name}」(id: {id}):先用 aigc_get_provider_info 查看配置,再用 aigc_http_request 探测它的 API(apiKey 会自动附加,无需手动传入),最后调用 aigc_provider_set_instructions 把调用说明保存下来,方便以后直接使用。',
   'row.auth': '鉴权方式',
@@ -211,6 +213,7 @@ export const en: Record<AigcKey, string> = {
   'row.collapse': 'Collapse',
   'row.create': 'Create',
   'row.cancel': 'Cancel',
+  'row.close': 'Close',
   'row.init': 'Initialize',
   'row.initPrompt': 'Please initialize the AIGC provider "{name}" (id: {id}): first call aigc_get_provider_info to see its config, then probe its API with aigc_http_request (the apiKey is attached automatically — do not pass it yourself), and finally call aigc_provider_set_instructions to save the usage instructions so it can be used directly later.',
   'row.auth': 'Auth scheme',

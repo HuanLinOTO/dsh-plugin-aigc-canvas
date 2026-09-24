@@ -6,7 +6,7 @@
  *
  * @module @huanlin/dsh-plugin-aigc-canvas/config
  */
-import z from 'schemastery';
+import z from '@deepseek-ai/schemastery';
 /** Provider id pattern: lowercase letters, digits, hyphens; must start with a letter. */
 export declare const PROVIDER_ID_PATTERN: RegExp;
 /** How the aigc_http_request tool attaches the provider apiKey to requests. */

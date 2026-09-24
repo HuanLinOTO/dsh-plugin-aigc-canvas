@@ -6,7 +6,7 @@
  *
  * @module @huanlin/dsh-plugin-aigc-canvas/config
  */
-import z from 'schemastery'
+import z from '@deepseek-ai/schemastery'
 
 /** Provider id pattern: lowercase letters, digits, hyphens; must start with a letter. */
 export const PROVIDER_ID_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/

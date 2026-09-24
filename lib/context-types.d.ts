@@ -85,6 +85,28 @@ export interface AigcLoader {
     entries(): Iterable<AigcLoaderEntry>;
 }
 /**
+ * The settings service face this plugin uses (mirror of
+ * `@deepseek-ai/dsh-settings` `SettingsForms`, dsh 0.1.7-rc.1). Restated
+ * structurally like the other faces above so the third-party resolution
+ * tree typechecks without a dependency on the DSH package.
+ */
+export interface AigcSettingsForms {
+    /** Register the calling plugin instance's settings-page policy. */
+    configure(presentation: {
+        auto?: boolean;
+    }, owner?: AigcCordisFiber): () => void;
+    /** Merge editable (volatile) fields into one entry's profile config. */
+    update(ns: string, patch: object, expectedRevision?: number): Promise<void>;
+}
+/**
+ * Structural slice of the DSH-vendored cordis `Fiber`: `configure` keys its
+ * presentation policy by fiber identity, and the plugin only ever passes
+ * `ctx.fiber` through.
+ */
+export interface AigcCordisFiber {
+    readonly uid: number | null;
+}
+/**
  * The tools service face restated.
  * Mirrored here exactly like better-sidebar does — the dual-cordis-instance
  * resolution otherwise hides the upstream augmentation. The `tools` service
@@ -101,6 +123,10 @@ declare module 'cordis' {
         sessions: AigcSessionStore;
         agents: AigcAgentRegistry;
         loader: AigcLoader;
+        /** The profile-owned settings forms service (dsh 0.1.7-rc.1); undefined when no settings provider is mounted. */
+        settings: AigcSettingsForms;
+        /** The plugin instance's fiber (DSH-vendored cordis). */
+        fiber: AigcCordisFiber;
         /**
          * The host-side AIGC canvas registry: holds the per-session element
          * table (prompts + generated assets) and edges. Provided by the host

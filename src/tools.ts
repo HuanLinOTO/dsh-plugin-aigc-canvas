@@ -289,7 +289,7 @@ function mimeFromExt(filePath: string): string {
  *
  * @param ctx - host plugin context (carries the tools service).
  * @param getProvider - live provider getter (takes optional provider id).
- * @param setInstructions - persists usage instructions for one provider (the host's ProviderStore).
+ * @param setInstructions - persists usage instructions for one provider (the host's ProviderStore; resolves after the profile-config commit).
  * @param listProviders - returns info for all providers (for aigc_get_provider_info).
  * @param canvas - the canvas registry service (host-owned state).
  * @param resolveCwd - live cwd resolver for one session id.
@@ -300,7 +300,7 @@ function mimeFromExt(filePath: string): string {
 export function registerTools(
   ctx: Context,
   getProvider: (providerId?: string) => ResolvedAigcProvider,
-  setInstructions: (id: string, instructions: string) => { ok: boolean; error?: string },
+  setInstructions: (id: string, instructions: string) => Promise<{ ok: boolean; error?: string }>,
   listProviders: () => readonly ProviderInfo[],
   canvas: AigcCanvasService,
   resolveCwd: (sessionId: string) => string,
@@ -647,7 +647,7 @@ export function registerTools(
       },
       render: textRender((v: { provider_id: string }) => `Saved usage instructions for provider "${v.provider_id}".`),
     },
-    execute: (args: { provider_id: string; instructions: string }) => {
+    execute: async (args: { provider_id: string; instructions: string }) => {
       if (typeof args.provider_id !== 'string' || args.provider_id === '') {
         throw new AigcError('bad-request', 'provider_id is required')
       }
@@ -655,9 +655,9 @@ export function registerTools(
         throw new AigcError('bad-request', 'instructions is required')
       }
       getProvider(args.provider_id) // throws for unknown ids
-      const result = setInstructions(args.provider_id, args.instructions)
+      const result = await setInstructions(args.provider_id, args.instructions)
       if (!result.ok) throw new AigcError('bad-request', result.error ?? 'cannot save instructions')
-      return Promise.resolve({ ok: true, provider_id: args.provider_id })
+      return { ok: true, provider_id: args.provider_id }
     },
   }))
 

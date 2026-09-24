@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "AIGC 画布",
+    "description": "面向 better-sidebar 的无限自由画布,搭配供应商无关的生成:模型通过 aigc_http_request 调用任意已配置供应商(endpoint + apiKey 自动附加),生成的图片/视频/音频可放置在画布任意位置,双击元素即可查看提示词与生成参数。"
+  }
+}

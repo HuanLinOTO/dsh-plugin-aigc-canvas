@@ -37,14 +37,16 @@ export type AigcKey =
   | 'deleteElement'
   | 'dropHint'
   | 'uploading'
-  // Settings — page chrome
-  | 'settingsNav'
-  | 'settingsTitle'
+  // Row configuration page (Plugins page)
+  | 'rowSummary'
   | 'settingsIntro'
   | 'settingsEmpty'
   | 'settingsAdd'
   | 'settingsLoading'
   | 'settingsError'
+  | 'settingsUnavailable'
+  | 'settingsReadOnly'
+  | 'settingsSaveFailed'
   // Settings — provider card
   | 'row.id'
   | 'row.name'
@@ -85,7 +87,7 @@ export const zh: Record<AigcKey, string> = {
   tabTitle: 'AIGC 画布',
   title: 'AIGC 画布',
   empty: '画布是空的。模型通过 aigc_http_request 调用供应商 API 生成素材,再用 aigc_canvas_place 把文件放到画布的任意位置。',
-  emptyHint: '可在右侧设置页配置供应商,然后让模型开始生成。',
+  emptyHint: '可在插件页(Plugins)的本插件行配置供应商,然后让模型开始生成。',
   prompt: '提示词',
   image: '图片',
   video: '视频',
@@ -111,13 +113,15 @@ export const zh: Record<AigcKey, string> = {
   deleteElement: '删除元素',
   dropHint: '拖放文件到画布',
   uploading: '上传中…',
-  settingsNav: 'AIGC 画布',
-  settingsTitle: 'AIGC 供应商',
+  rowSummary: '配置 AIGC 生成供应商(API 地址、密钥、鉴权方式、调用说明)。',
   settingsIntro: '配置一个或多个 AIGC 供应商。每个供应商可独立设置名称、API 地址、密钥、鉴权方式和调用说明。模型通过 aigc_get_provider_info 读取供应商列表,用 aigc_http_request 调用 API(自动携带 endpoint 和 apiKey),生成的文件用 aigc_canvas_place 放到画布上。',
   settingsEmpty: '暂无供应商,请在下方添加。',
   settingsAdd: '+ 添加供应商',
   settingsLoading: '加载中…',
   settingsError: '错误',
+  settingsUnavailable: '设置服务不可用（宿主未提供此插件的配置）。',
+  settingsReadOnly: '当前连接不持久化配置，修改将不会保存。',
+  settingsSaveFailed: '保存失败：配置已在其他位置修改，请稍后重试。',
   'row.id': 'ID',
   'row.name': '名称',
   'row.endpoint': 'API 地址',
@@ -158,7 +162,7 @@ export const en: Record<AigcKey, string> = {
   tabTitle: 'AIGC Canvas',
   title: 'AIGC Canvas',
   empty: 'Canvas is empty. The agent calls provider APIs via aigc_http_request and places the generated files anywhere on the canvas with aigc_canvas_place.',
-  emptyHint: 'Configure a provider in the settings tab on the right, then ask the agent to generate something.',
+  emptyHint: 'Configure providers on the Plugins page (this plugin\'s row), then ask the agent to generate something.',
   prompt: 'Prompt',
   image: 'Image',
   video: 'Video',
@@ -184,13 +188,15 @@ export const en: Record<AigcKey, string> = {
   deleteElement: 'Delete element',
   dropHint: 'Drop files onto canvas',
   uploading: 'Uploading…',
-  settingsNav: 'AIGC Canvas',
-  settingsTitle: 'AIGC Providers',
+  rowSummary: 'Configure AIGC generation providers (API endpoint, key, auth scheme, usage instructions).',
   settingsIntro: 'Configure one or more AIGC providers. Each provider has its own name, API endpoint, key, auth scheme, and usage instructions. The agent reads the provider list via aigc_get_provider_info, calls the API via aigc_http_request (endpoint + apiKey attached automatically), and places generated files onto the canvas with aigc_canvas_place.',
   settingsEmpty: 'No providers configured. Add one below.',
   settingsAdd: '+ Add provider',
   settingsLoading: 'Loading…',
   settingsError: 'Error',
+  settingsUnavailable: 'Settings are unavailable (the host does not serve this plugin\'s configuration).',
+  settingsReadOnly: 'This connection does not persist configuration; changes will not be saved.',
+  settingsSaveFailed: 'Save refused — the configuration changed elsewhere. Please retry.',
   'row.id': 'ID',
   'row.name': 'Name',
   'row.endpoint': 'Endpoint',

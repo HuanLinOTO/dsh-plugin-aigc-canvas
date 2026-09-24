@@ -1,14 +1,17 @@
 /**
  * Serializable configuration and defaults for the AIGC canvas host half.
  * The `providers` array holds one or more AIGC provider configs (name /
- * endpoint / apiKey / instructions), editable at runtime through the DSH
- * GUI settings page; cordis.yml `config:` is the first-boot seed only.
+ * endpoint / apiKey / instructions). Since dsh 0.1.7-rc.1 the editable
+ * fields are `.volatile()` members of the entry's profile-owned Cordis
+ * Config (DSH-0.1.7-J1-04): the composition `config:` in cordis.patch.yml is
+ * the first-boot seed only, and runtime edits persist per profile under the
+ * entry id `dsh-aigc-canvas` through the settings service.
  *
  * @module @huanlin/dsh-plugin-aigc-canvas/config
  */
 import z from '@deepseek-ai/schemastery';
-/** Provider id pattern: lowercase letters, digits, hyphens; must start with a letter. */
-export declare const PROVIDER_ID_PATTERN: RegExp;
+import type { Volatile } from '@deepseek-ai/cordis';
+export { PROVIDER_ID_PATTERN, validateProviderId } from './provider-shape.js';
 /** How the aigc_http_request tool attaches the provider apiKey to requests. */
 export interface AigcProviderAuth {
     /**
@@ -34,7 +37,7 @@ export interface AigcProvider {
     name: string;
     /** Provider API endpoint URL. `stub://aigc-backend` = the built-in stub. */
     endpoint: string;
-    /** Provider API key (stored in memory only; set via GUI or cordis.yml). */
+    /** Provider API key (persisted with the entry config in cordis.patch.yml; set via GUI or seed). */
     apiKey: string;
     /** Free-form usage instructions the agent reads via aigc_get_provider_info. */
     instructions: string;
@@ -52,8 +55,29 @@ export interface AigcCanvasConfig {
     /** Maximum media bytes to write to disk per generated asset. */
     mediaSizeLimit?: number;
 }
-/** Schemastery schema for the plugin configuration. */
-export declare const Config: z<AigcCanvasConfig>;
+/**
+ * The live Cordis config the Loader passes to `apply`.
+ *
+ * `providers` is `.volatile()`: the field arrives as a stable reference whose
+ * `.get()` always returns the latest accepted value (a committed settings
+ * edit updates it in place without remounting the plugin). The other fields
+ * are composition-seed knobs resolved once at load.
+ */
+export interface AigcEntryConfig {
+    /** Live provider list reference; `.get()` returns the latest accepted value. */
+    providers?: Volatile<readonly AigcProvider[]>;
+    requestTimeoutMs?: number;
+    mediaSizeLimit?: number;
+}
+/**
+ * Schemastery schema for the plugin's profile-owned Config.
+ *
+ * `providers` is `.volatile()` (dsh 0.1.7-rc.1 DSH-0.1.7-J1-04): the settings
+ * service enumerates the entry's volatile fields for the configuration form,
+ * and a committed edit updates the running reference in place. The numeric
+ * knobs stay non-volatile (cordis.patch.yml seed only).
+ */
+export declare const Config: z<AigcEntryConfig>;
 /** A fully-resolved provider (all fields guaranteed). */
 export interface ResolvedAigcProvider extends AigcProvider {
     name: string;
@@ -71,7 +95,21 @@ export interface ResolvedAigcConfig {
 }
 /** Returns true when the provider endpoint points at the built-in stub backend. */
 export declare function isStubEndpoint(endpoint: string): boolean;
-/** Validate a provider id; returns an error message or undefined if valid. */
-export declare function validateProviderId(id: string): string | undefined;
-/** Apply direct-call defaults after Loader schema validation has normally run. */
-export declare function resolveAigcConfig(config: AigcCanvasConfig | undefined): ResolvedAigcConfig;
+/**
+ * Normalize a raw provider list (the volatile reference's latest snapshot, a
+ * legacy imported document, or a hand-edited override) into resolved
+ * providers. Non-object entries are skipped; duplicate ids keep the first
+ * occurrence (insertion order preserved).
+ * @param raw - the raw list value.
+ * @returns the resolved providers, in order, deduplicated by id.
+ */
+export declare function resolveAigcProviders(raw: unknown): readonly ResolvedAigcProvider[];
+/**
+ * Resolve the apply-time seed config (direct-call defaults after Loader
+ * schema validation has normally run). The provider list reads the live
+ * volatile reference; when it resolves empty at load, the default stub is
+ * seeded so the tools always have one provider.
+ * @param config - the entry config the Loader passed to `apply`.
+ * @returns the fully defaulted seed settings.
+ */
+export declare function resolveAigcConfig(config: AigcEntryConfig | undefined): ResolvedAigcConfig;

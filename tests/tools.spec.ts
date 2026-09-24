@@ -75,13 +75,13 @@ function providerInfoList(providers: readonly ResolvedAigcProvider[]): readonly 
 /** A mutable instruction map backing the aigc_provider_set_instructions callback. */
 function makeInstructionStore(providers: readonly ResolvedAigcProvider[]): {
   map: Map<string, string>
-  set: (id: string, instructions: string) => { ok: boolean; error?: string }
+  set: (id: string, instructions: string) => Promise<{ ok: boolean; error?: string }>
 } {
   const map = new Map<string, string>()
   for (const p of providers) map.set(p.id, p.instructions)
   return {
     map,
-    set: (id, instructions) => {
+    set: async (id, instructions) => {
       if (!map.has(id)) return { ok: false, error: `provider id not found: ${id}` }
       map.set(id, instructions)
       return { ok: true }
@@ -110,8 +110,8 @@ function registerAll(
       }
       return p
     },
-    (id, instructions) => {
-      const result = instructionStore.set(id, instructions)
+    async (id, instructions) => {
+      const result = await instructionStore.set(id, instructions)
       if (result.ok) {
         const p = byId.get(id)
         if (p !== undefined) p.instructions = instructions

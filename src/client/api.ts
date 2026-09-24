@@ -1,6 +1,9 @@
 /**
- * Typed fetch wrapper over the /aigc-canvas JSON API.
+ * Typed fetch wrapper over the /aigc-canvas JSON API, plus the settings
+ * form value types the settings page consumes through `ctx.configForms`
+ * (dsh 0.1.7-rc.1 DSH-0.1.7-J1-27).
  */
+import type { ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 
 /** One wire failure. */
 export class AigcApiError extends Error {
@@ -58,16 +61,16 @@ export interface RuntimeProvider {
   builtin: boolean
 }
 
-/** Global settings wire shape. */
-export interface RuntimeGlobalSettings {
-  requestTimeoutMs: number
-  mediaSizeLimit: number
-}
-
-/** Full config response (providers + global settings). */
-export interface RuntimeConfig extends RuntimeGlobalSettings {
+/**
+ * The settings form value served under the `dsh-aigc-canvas` entry id:
+ * the entry's volatile fields (only `providers` is volatile).
+ */
+export interface AigcFormValue {
   providers: RuntimeProvider[]
 }
+
+/** Sync snapshot of the plugin's settings form (status / value / revision / writable). */
+export type AigcFormSnapshot = ConfigFormSnapshot<AigcFormValue>
 
 async function call<T>(method: string, payload: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
   let response: Response
@@ -110,31 +113,6 @@ export function deleteCanvasElement(sessionId: string, uuid: string, signal?: Ab
 /** Upload a file (drag-dropped onto the canvas) and place it as a new element. */
 export function uploadCanvasFile(sessionId: string, fileName: string, mediaBase64: string, opts?: { x?: number; y?: number; description?: string }, signal?: AbortSignal): Promise<{ ok: boolean; element: AigcElement }> {
   return call<{ ok: boolean; element: AigcElement }>('canvas.upload', { sessionId, fileName, mediaBase64, ...opts }, signal)
-}
-
-/** Fetch the full runtime config (providers + global settings). */
-export function fetchConfig(signal?: AbortSignal): Promise<RuntimeConfig> {
-  return call<RuntimeConfig>('config.get', {}, signal)
-}
-
-/** List all providers. */
-export function listProviders(signal?: AbortSignal): Promise<{ providers: RuntimeProvider[] }> {
-  return call<{ providers: RuntimeProvider[] }>('providers.list', {}, signal)
-}
-
-/** Add a new provider. */
-export function addProvider(provider: RuntimeProvider, signal?: AbortSignal): Promise<{ providers: RuntimeProvider[] }> {
-  return call<{ providers: RuntimeProvider[] }>('providers.add', { provider }, signal)
-}
-
-/** Update an existing provider. */
-export function updateProvider(provider: RuntimeProvider, signal?: AbortSignal): Promise<{ providers: RuntimeProvider[] }> {
-  return call<{ providers: RuntimeProvider[] }>('providers.update', { provider }, signal)
-}
-
-/** Remove a provider by id. */
-export function removeProvider(id: string, signal?: AbortSignal): Promise<{ providers: RuntimeProvider[] }> {
-  return call<{ providers: RuntimeProvider[] }>('providers.remove', { id }, signal)
 }
 
 /** Build the media URL for one element's media file (by uuid; the host resolves to the file). */

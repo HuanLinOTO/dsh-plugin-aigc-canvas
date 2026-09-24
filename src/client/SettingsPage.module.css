@@ -1,6 +1,6 @@
-/* AIGC canvas settings section, in the settings-panel design language shared
- * with ModelsSection / GeneralSection / yet-another-subagent: 14/22 body,
- * 12/18 caption, 16/24 title, capsule controls (h36 r18 primary, h28 r14
+/* AIGC canvas row-configuration page, in the design language shared with
+ * ModelsSection / GeneralSection / yet-another-subagent: 14/22 body,
+ * 12/18 caption, capsule controls (h36 r18 primary, h28 r14
  * secondary), 32px fields, border-l2 hairlines, and the editor as a filled
  * module on the panel fill.
  *
@@ -11,14 +11,6 @@
   flex-direction: column;
   gap: 12px;
   max-width: 720px;
-  color: var(--dsw-alias-label-primary);
-}
-
-.title {
-  margin: 0;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 500;
   color: var(--dsw-alias-label-primary);
 }
 

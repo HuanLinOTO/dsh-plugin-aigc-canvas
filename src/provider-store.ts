@@ -1,36 +1,20 @@
 /**
- * In-memory provider store with CRUD + disk persistence. Holds the
- * canonical list of AIGC providers; tool registration and the settings-
- * page RPC share one instance per plugin fiber. Persisted to
- * `~/.dsh/aigc-canvas/providers.json` so restarts keep user-added
- * providers and instructions.
+ * Provider store with CRUD, read-through the entry's profile-owned Cordis
+ * Config when a persistence face is attached (the list persists in the
+ * active profile's `cordis.patch.yml` under the `dsh-aigc-canvas` entry id,
+ * dsh 0.1.7-rc.1 DSH-0.1.7-J1-04). Reads derive from the persistence
+ * source on every call, so edits committed by ANY writer (the settings
+ * page through the client `configForms` transport, the model's
+ * aigc_provider_set_instructions tool, a hand-edited profile patch) are
+ * visible immediately. Without an attached face (headless assemblies with
+ * no settings provider) the store is in-memory only: composition seed,
+ * lost on unload.
  *
  * @module @huanlin/dsh-plugin-aigc-canvas/provider-store
  */
-import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { mkdir, rename, writeFile } from 'node:fs/promises'
-import { readFileSync } from 'node:fs'
 import type { AigcProvider, ResolvedAigcProvider } from './config.js'
-import { validateProviderId } from './config.js'
-
-/** Directory for persisted AIGC canvas state (under the DSH user dir). */
-const DATA_DIR = join(homedir(), '.dsh', 'aigc-canvas')
-
-/** Path to the persisted providers JSON. */
-const PROVIDERS_JSON = join(DATA_DIR, 'providers.json')
-
-/** Atomic write: mkdir + temp file + rename. */
-async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
-  const tmp = `${path}.tmp-${process.pid}`
-  try {
-    await mkdir(dirname(path), { recursive: true })
-    await writeFile(tmp, JSON.stringify(value, null, 2), 'utf8')
-    await rename(tmp, path)
-  } catch {
-    // Best-effort: leave the temp file behind if rename fails.
-  }
-}
+import { resolveAigcProviders } from './config.js'
+import { validateProviderId } from './provider-shape.js'
 
 /** CRUD result: the success branch carries the latest list. */
 export type ProviderMutationResult =
@@ -38,180 +22,167 @@ export type ProviderMutationResult =
   | { readonly ok: false; readonly error: string }
 
 /**
- * Mutable provider store. Owns the canonical provider list; the backend
- * client map and RPC handlers share one instance per plugin fiber.
+ * Persistence face attached to a {@link ProviderStore}.
  *
- * Persistence: on construction the store loads `~/.dsh/aigc-canvas/
- * providers.json` (if present) and merges it over the cordis.yml seed —
- * persisted providers win, so user edits and deletions survive restarts.
- * Every mutation writes the list back to disk (fire-and-forget).
+ * `source` reads the currently committed raw list (the entry's live volatile
+ * config); `persist` commits a replacement. Both are provided by
+ * `installAigcSettings` (see `settings.ts`).
+ */
+export interface ProviderPersistence {
+  /** The currently committed raw provider list. */
+  source(): readonly AigcProvider[]
+  /** Commit a replacement list. */
+  persist(providers: readonly AigcProvider[]): Promise<void>
+}
+
+/**
+ * Mutable provider store. Owns the canonical provider list; tool
+ * registration shares one instance per plugin fiber.
+ *
+ * While no persistence face is attached the in-memory map is canonical
+ * (headless mode). Once a face is attached, every read resolves through the
+ * face's source and every mutation commits through `persist` before its
+ * result is reported — the committed profile config is the single source of
+ * truth.
  */
 export class ProviderStore {
   private readonly providers = new Map<string, ResolvedAigcProvider>()
-  private readonly dataPath: string
-  /** Serializes disk writes so rapid mutations can't interleave. */
-  private persistChain: Promise<void> = Promise.resolve()
+  /** Optional persistence face; absent in headless mode. */
+  private persistence: ProviderPersistence | undefined
 
-  constructor(seed: readonly AigcProvider[], dataPath: string = PROVIDERS_JSON) {
-    this.dataPath = dataPath
-    const seedBuiltin = new Map(seed.map(p => [p.id, p.builtin ?? false]))
-    const persisted = loadPersistedSync(dataPath)
-    const sources: readonly AigcProvider[] = persisted ?? seed
-    for (const p of sources) {
-      const resolved: ResolvedAigcProvider = {
-        id: p.id,
-        name: p.name ?? '',
-        endpoint: p.endpoint ?? 'stub://aigc-backend',
-        apiKey: p.apiKey ?? '',
-        instructions: p.instructions ?? '',
-        auth: {
-          scheme: p.auth?.scheme ?? 'bearer',
-          name: p.auth?.name ?? '',
-        },
-        // builtin is a seed-layer hint: restore it from the seed even when
-        // the provider came from disk (a persisted file never marks builtin).
-        builtin: seedBuiltin.get(p.id) ?? false,
-      }
-      this.providers.set(resolved.id, resolved)
+  /** @param seed - resolved seed providers (the composition layer). */
+  constructor(seed: readonly ResolvedAigcProvider[]) {
+    for (const provider of seed) {
+      this.providers.set(provider.id, provider)
     }
   }
 
-  /** Snapshot of all providers, in insertion order. */
+  /**
+   * Attach a persistence face. Subsequent reads derive from the face's
+   * source and mutations commit through it.
+   * @param persistence - the read/write face over the entry's config.
+   */
+  attachPersistence(persistence: ProviderPersistence): void {
+    this.persistence = persistence
+  }
+
+  /** The committed provider list (insertion order; duplicates keep the first). */
+  private committed(): readonly ResolvedAigcProvider[] {
+    if (this.persistence === undefined) return [...this.providers.values()]
+    return resolveAigcProviders(this.persistence.source())
+  }
+
+  /** Snapshot of all providers, in order. */
   list(): readonly ResolvedAigcProvider[] {
-    return [...this.providers.values()]
+    return this.committed()
   }
 
   /** Look up one provider by id. */
   get(id: string): ResolvedAigcProvider | undefined {
-    return this.providers.get(id)
+    return this.committed().find(provider => provider.id === id)
   }
 
-  /** The default provider (first in insertion order); undefined if empty. */
+  /** The default provider (first in order); undefined if empty. */
   defaultProvider(): ResolvedAigcProvider | undefined {
-    return this.providers.values().next().value as ResolvedAigcProvider | undefined
+    return this.committed()[0]
   }
 
   /** Add a new provider. Returns failure for duplicate id or invalid shape. */
-  add(provider: AigcProvider): ProviderMutationResult {
+  async add(provider: AigcProvider): Promise<ProviderMutationResult> {
     const idError = validateProviderId(provider.id)
     if (idError !== undefined) return { ok: false, error: idError }
-    if (this.providers.has(provider.id)) {
+    const committed = this.committed()
+    if (committed.some(p => p.id === provider.id)) {
       return { ok: false, error: `provider id already exists: ${provider.id}` }
     }
-    // RPC-added providers are never builtin: only the cordis.yml seed can mark
-    // a provider as builtin. Strip any caller-supplied builtin=true.
-    const stored: ResolvedAigcProvider = {
-      id: provider.id,
-      name: provider.name ?? '',
-      endpoint: provider.endpoint ?? 'stub://aigc-backend',
-      apiKey: provider.apiKey ?? '',
-      instructions: provider.instructions ?? '',
-      auth: {
-        scheme: provider.auth?.scheme ?? 'bearer',
-        name: provider.auth?.name ?? '',
-      },
-      builtin: false,
-    }
-    this.providers.set(stored.id, stored)
-    this.persist()
-    return { ok: true, providers: this.list() }
+    // Mutations added at runtime are never builtin: only the composition
+    // seed can mark a provider as builtin. Strip any caller-supplied
+    // builtin=true.
+    const stored: ResolvedAigcProvider = { ...resolveStored(provider), builtin: false }
+    return this.commit([...committed, stored])
   }
 
   /** Update an existing provider. Returns failure if the id is unknown. */
-  update(provider: AigcProvider): ProviderMutationResult {
+  async update(provider: AigcProvider): Promise<ProviderMutationResult> {
     const idError = validateProviderId(provider.id)
     if (idError !== undefined) return { ok: false, error: idError }
-    const existing = this.providers.get(provider.id)
+    const committed = this.committed()
+    const existing = committed.find(p => p.id === provider.id)
     if (existing === undefined) {
       return { ok: false, error: `provider id not found: ${provider.id}` }
     }
     // The `builtin` flag is a presentation hint owned by the seed layer: an
-    // update cannot flip it.
+    // update cannot flip it. Auth members omitted from the update keep the
+    // committed values.
     const stored: ResolvedAigcProvider = {
-      id: provider.id,
-      name: provider.name ?? '',
-      endpoint: provider.endpoint ?? 'stub://aigc-backend',
-      apiKey: provider.apiKey ?? '',
-      instructions: provider.instructions ?? '',
+      ...resolveStored(provider),
       auth: {
         scheme: provider.auth?.scheme ?? existing.auth.scheme,
         name: provider.auth?.name ?? existing.auth.name,
       },
       builtin: existing.builtin,
     }
-    this.providers.set(stored.id, stored)
-    this.persist()
-    return { ok: true, providers: this.list() }
+    return this.commit(committed.map(p => (p.id === stored.id ? stored : p)))
   }
 
   /**
    * Replace a provider's usage instructions (called by the model's
    * aigc_provider_set_instructions tool after it probes the API).
    */
-  setInstructions(id: string, instructions: string): ProviderMutationResult {
-    const existing = this.providers.get(id)
+  async setInstructions(id: string, instructions: string): Promise<ProviderMutationResult> {
+    const committed = this.committed()
+    const existing = committed.find(p => p.id === id)
     if (existing === undefined) {
       return { ok: false, error: `provider id not found: ${id}` }
     }
-    const stored: ResolvedAigcProvider = { ...existing, instructions }
-    this.providers.set(stored.id, stored)
-    this.persist()
-    return { ok: true, providers: this.list() }
+    return this.commit(committed.map(p => (p.id === id ? { ...p, instructions } : p)))
   }
 
   /** Remove a provider. Returns failure for unknown id. */
-  remove(id: string): ProviderMutationResult {
-    if (!this.providers.delete(id)) {
+  async remove(id: string): Promise<ProviderMutationResult> {
+    const committed = this.committed()
+    if (!committed.some(p => p.id === id)) {
       return { ok: false, error: `provider id not found: ${id}` }
     }
-    this.persist()
-    return { ok: true, providers: this.list() }
+    return this.commit(committed.filter(p => p.id !== id))
   }
 
   /**
-   * Persist the current provider list to disk (fire-and-forget, serialized).
-   * Only the user-editable fields are written; `builtin` is re-derived from
-   * the seed on load. Failures are swallowed — the in-memory state stays
-   * canonical. Each call snapshots the CURRENT list, so a burst of mutations
-   * ends with the latest state on disk.
+   * Commit a replacement list: through the persistence face when attached
+   * (the post-commit committed value is reported), otherwise into the
+   * in-memory map. A refused persistence write leaves the committed state
+   * untouched and reports `{ ok: false }`.
    */
-  private persist(): void {
-    const snapshot = [...this.providers.values()].map(({ builtin: _b, ...rest }) => rest)
-    this.persistChain = this.persistChain
-      .then(() => writeJsonAtomic(this.dataPath, snapshot))
-      .catch(() => {})
+  private async commit(next: readonly AigcProvider[]): Promise<ProviderMutationResult> {
+    if (this.persistence === undefined) {
+      this.providers.clear()
+      for (const provider of resolveAigcProviders(next)) {
+        this.providers.set(provider.id, provider)
+      }
+      return { ok: true, providers: this.list() }
+    }
+    try {
+      await this.persistence.persist(next)
+      return { ok: true, providers: this.list() }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
   }
 }
 
-/** Read the persisted providers JSON; returns null when absent/unreadable. */
-function loadPersistedSync(dataPath: string): readonly AigcProvider[] | null {
-  try {
-    const raw = readFileSync(dataPath, 'utf8')
-    const parsed = JSON.parse(raw) as unknown
-    if (!Array.isArray(parsed)) return null
-    const providers: AigcProvider[] = []
-    for (const item of parsed) {
-      if (typeof item !== 'object' || item === null) continue
-      const rec = item as Record<string, unknown>
-      if (typeof rec.id !== 'string' || rec.id === '') continue
-      providers.push({
-        id: rec.id,
-        name: typeof rec.name === 'string' ? rec.name : '',
-        endpoint: typeof rec.endpoint === 'string' ? rec.endpoint : 'stub://aigc-backend',
-        apiKey: typeof rec.apiKey === 'string' ? rec.apiKey : '',
-        instructions: typeof rec.instructions === 'string' ? rec.instructions : '',
-        ...(typeof rec.auth === 'object' && rec.auth !== null ? {
-          auth: {
-            scheme: (rec.auth as Record<string, unknown>).scheme === 'header' || (rec.auth as Record<string, unknown>).scheme === 'query'
-              ? (rec.auth as Record<string, unknown>).scheme as 'header' | 'query'
-              : 'bearer',
-            name: typeof (rec.auth as Record<string, unknown>).name === 'string' ? (rec.auth as Record<string, unknown>).name as string : '',
-          },
-        } : {}),
-      })
-    }
-    return providers
-  } catch {
-    return null
+/** Normalize one mutation input into its resolved stored shape. */
+function resolveStored(provider: AigcProvider): ResolvedAigcProvider {
+  const auth = provider.auth ?? {}
+  return {
+    id: provider.id,
+    name: provider.name ?? '',
+    endpoint: provider.endpoint ?? 'stub://aigc-backend',
+    apiKey: provider.apiKey ?? '',
+    instructions: provider.instructions ?? '',
+    auth: {
+      scheme: auth.scheme ?? 'bearer',
+      name: auth.name ?? '',
+    },
+    builtin: provider.builtin ?? false,
   }
 }

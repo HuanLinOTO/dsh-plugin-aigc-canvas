@@ -1,20 +1,34 @@
 /**
  * Client half of @huanlin/dsh-plugin-aigc-canvas: registers
  *  (1) a better-sidebar tab (`aigc-canvas:main`) rendering the canvas view, and
- *  (2) a settings.section slot for the provider config page.
+ *  (2) a `plugins.row.config` entry — the provider configuration page opened
+ *      from this bundle's row on the Plugins page (dsh 0.1.7-rc.1: the
+ *      shared-settings tab was retired in favor of it).
  *
  * i18n: registers the `dsh-aigc-canvas` locale namespace (zh + en) and binds
- * a translate function passed to both the canvas view and the settings page
+ * a translate function passed to both the canvas view and the config page
  * via inject — so the UI respects the DSH locale toggle (no hardcoded text).
  *
- * The settings page's "initialize" action sends a prepared prompt into the
+ * The config page's "initialize" action sends a prepared prompt into the
  * current conversation via the `conversation` service (ui-conversation).
+ *
+ * Settings transport (dsh 0.1.7-rc.1 DSH-0.1.7-J1-27): the page binds the
+ * entry's shared `ConfigForm` through `ctx.configForms.get('dsh-aigc-canvas')`
+ * — reads ride the settings describe mirror, writes go through
+ * `settings.mutate` — and is passed to the page reactively through the
+ * registration's `hooks` compartment. The registration itself is gated on
+ * `configForms.whileServed`, so disabling the row withdraws the configure
+ * entry from the Plugins page.
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-// Type-only: pulls the settings shell's SlotMap merge (settings.section).
+// Type-only: pulls the settings shell's ConfigForms service merge
+// (ctx.configForms) — the read/write channel this page binds.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+// Type-only: pulls the Plugins page's SlotMap merge (the 'plugins.row.config'
+// keyed entry — this half's registration target).
+import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 // Type-only: pulls the conversation service merge (ctx.conversation.send).
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 // Type-only: pulls the SlotRegistry service merge (ctx.slots).
@@ -26,8 +40,10 @@ import { createElement, useEffect, useRef, type ReactNode } from 'react'
 import { CanvasStore } from './store.js'
 import { CanvasViewWithBoundary } from './CanvasView.js'
 import { SettingsPage, type AigcSettingsInjected } from './SettingsPage.js'
+import { type AigcFormValue } from './api.js'
 import { en, zh, NS, type AigcKey } from './locales.js'
 import { dicts } from './dictionaries.js'
+import { ENTRY_ID, ROW_CONFIG_KEY } from '../entry-identity.js'
 
 /** Locale namespace map declaration for the DSH locale system. */
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -38,8 +54,9 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 /** Services required before mounting. `betterSidebar` is intentionally NOT
  *  listed here — this plugin extends `dsh-better-sidebar` when present, but
- *  must remain loadable without it (defensive lookup via `ctx.get(...)`). */
-export const inject = ['slots', 'locale', 'conversation']
+ *  must remain loadable without it (defensive lookup via `ctx.get(...)`).
+ *  `configForms` is provided by the ui-settings base plugin. */
+export const inject = ['slots', 'locale', 'conversation', 'configForms']
 
 export function apply(ctx: ClientContext): void {
   // ── Locale registration ────────────────────────────────────────────────
@@ -99,19 +116,31 @@ export function apply(ctx: ClientContext): void {
     )
   }
 
-  // ── Settings section ────────────────────────────────────────────────────
+  // ── Plugins page row configuration ─────────────────────────────────────
+  // The provider list lives in the entry's profile-owned Config; the shared
+  // config form (ui-settings base service) is the read/write channel. The
+  // contribution is keyed `<package>#<row id>` (the row id is the patch
+  // insert line's `id`, passed through verbatim) and gated on the Host
+  // serving the entry's config — a disabled row withdraws the configure
+  // control from the Plugins page.
+  const form = ctx.configForms.get<AigcFormValue>(ENTRY_ID)
   const settingsInjected = (): AigcSettingsInjected => ({
     t,
     send: (text) => ctx.conversation.send(text),
+    hooks: { aigcSettings: form },
+    saveProviders: (providers) => form.set('providers', providers.map(p => ({ ...p, auth: { ...p.auth } }))),
   })
-  ctx.slots.inject('settings.section', () =>
-    ctx.slots.register({
-      name: 'settings.section',
-      id: 'aigc-canvas',
-      order: 60,
-      label: () => t('settingsNav'),
-      locale: NS,
-      inject: settingsInjected,
-    }, SettingsPage),
+  ctx.effect(
+    () => ctx.configForms.whileServed([ENTRY_ID], () =>
+      ctx.slots.inject('plugins.row.config', function* () {
+        yield ctx.slots.register({
+          name: 'plugins.row.config',
+          key: ROW_CONFIG_KEY,
+          locale: NS,
+          inject: settingsInjected,
+        }, SettingsPage)
+      }),
+    ),
+    'dsh-aigc-canvas: plugin row config page',
   )
 }

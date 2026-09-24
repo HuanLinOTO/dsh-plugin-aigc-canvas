@@ -1,9 +1,9 @@
 /**
  * @huanlin/dsh-plugin-aigc-canvas host half: the canvas registry, the provider
- * store (config + per-provider usage instructions), the fenced
- * `/aigc-canvas/api/*` JSON API (provider CRUD + canvas.list/move) +
- * `/aigc-canvas/file` media route + `/aigc-canvas/ws/canvas` push WebSocket,
- * and the `ctx.aigcCanvas` service.
+ * store (the entry's profile-owned Config + per-provider usage
+ * instructions), the fenced `/aigc-canvas/api/*` JSON API
+ * (canvas.list/move/delete/upload) + `/aigc-canvas/file` media route +
+ * `/aigc-canvas/ws/canvas` push WebSocket, and the `ctx.aigcCanvas` service.
  *
  * Model-facing tools (see tools.ts): aigc_get_provider_info, the generic
  * aigc_http_request (auto-attaches endpoint + apiKey per provider config),
@@ -11,10 +11,13 @@
  * probing the API), aigc_canvas_place / aigc_canvas_link / aigc_canvas_unlink
  * (put files on the free canvas), and aigc_canvas_list_elements.
  *
- * Provider config is editable at runtime: the settings page posts to
- * `/aigc-canvas/api/providers.add|update|remove`, which updates the
- * ProviderStore. Tools read the provider through a getter so they always
- * see the latest configuration.
+ * Provider config is profile-owned (dsh 0.1.7-rc.1 DSH-0.1.7-J1-04): the
+ * `providers` field of the entry's Cordis Config is `.volatile()` and
+ * persists per profile in `cordis.patch.yml` under the entry id
+ * `dsh-aigc-canvas`. The settings page reads/writes it through the client
+ * `configForms` transport (DSH-0.1.7-J1-27); the model's instruction tool
+ * writes through the same settings bridge. Tools read the provider through
+ * a getter so they always see the latest committed configuration.
  */
 import { readFile, stat, writeFile, mkdir } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
@@ -25,12 +28,13 @@ import type { Context } from './context-types.js'
 import {
   Config,
   resolveAigcConfig,
-  type AigcCanvasConfig,
+  type AigcEntryConfig,
   type AigcProvider,
   type ResolvedAigcConfig,
   type ResolvedAigcProvider,
 } from './config.js'
 import { ProviderStore } from './provider-store.js'
+import { installAigcSettings, SETTINGS_NAMESPACE } from './settings.js'
 import {
   canvasDirFor,
   createAigcCanvasService,
@@ -43,8 +47,9 @@ import { isTrustedApiRequest } from './trust-fence.js'
 import { registerTools } from './tools.js'
 import { AigcError, readJsonBody, requireString, writeError, writeJson, writeOk } from './wire.js'
 
-export { Config }
-export type { AigcCanvasConfig, AigcProvider, ResolvedAigcConfig, ResolvedAigcProvider }
+export { Config, SETTINGS_NAMESPACE }
+export type { AigcCanvasConfig } from './config.js'
+export type { AigcEntryConfig, AigcProvider, ResolvedAigcConfig, ResolvedAigcProvider }
 export type { Context } from './context-types.js'
 export type {
   AigcCanvasService,
@@ -85,23 +90,6 @@ function sessionCwdOf(ctx: Context, sessionId: string): string {
   throw new AigcError('not-found', `session "${sessionId}" is not registered or has no cwd yet`, 404)
 }
 
-/** Wire shape for one provider (what the settings page reads/writes). */
-type RuntimeProvider = ResolvedAigcProvider
-
-/** Wire shape for the global settings. */
-interface RuntimeGlobalSettings {
-  requestTimeoutMs: number
-  mediaSizeLimit: number
-}
-
-/** Convert a resolved config to the runtime global settings wire shape. */
-function toGlobalSettings(resolved: ResolvedAigcConfig): RuntimeGlobalSettings {
-  return {
-    requestTimeoutMs: resolved.requestTimeoutMs,
-    mediaSizeLimit: resolved.mediaSizeLimit,
-  }
-}
-
 /**
  * Build a minimal user-role message and inject it into the agent's
  * next-step context (non-waking). Used to notify the model of user-
@@ -132,8 +120,7 @@ function kindForExtension(ext: string): 'image' | 'video' | 'audio' | 'prompt' {
 function buildApi(
   ctx: Context,
   canvas: AigcCanvasService,
-  store: ProviderStore,
-  getResolved: () => ResolvedAigcConfig,
+  getMediaLimit: () => number,
 ): Record<string, (payload: unknown) => Promise<unknown> | unknown> {
   return {
     'canvas.list': async (payload) => {
@@ -181,7 +168,7 @@ function buildApi(
         throw new AigcError('bad-request', 'fileName and mediaBase64 are required strings')
       }
       const bytes = Buffer.from(mediaBase64, 'base64')
-      if (bytes.byteLength > getResolved().mediaSizeLimit) {
+      if (bytes.byteLength > getMediaLimit()) {
         throw new AigcError('fs-error', `uploaded file too large (${bytes.byteLength} bytes)`)
       }
       const cwd = sessionCwdOf(ctx, sessionId)
@@ -212,47 +199,11 @@ function buildApi(
       )
       return { ok: true, element: el }
     },
-    'providers.list': () => {
-      return { providers: store.list() }
-    },
-    'providers.add': (payload) => {
-      const record = payload as { provider?: unknown } | null
-      const provider = record?.provider
-      if (provider === null || typeof provider !== 'object' || Array.isArray(provider)) {
-        throw new AigcError('bad-request', 'expected { provider: AigcProvider }')
-      }
-      const result = store.add(provider as AigcProvider)
-      if (!result.ok) throw new AigcError('bad-request', result.error)
-      return { providers: result.providers }
-    },
-    'providers.update': (payload) => {
-      const record = payload as { provider?: unknown } | null
-      const provider = record?.provider
-      if (provider === null || typeof provider !== 'object' || Array.isArray(provider)) {
-        throw new AigcError('bad-request', 'expected { provider: AigcProvider }')
-      }
-      const result = store.update(provider as AigcProvider)
-      if (!result.ok) throw new AigcError('bad-request', result.error)
-      return { providers: result.providers }
-    },
-    'providers.remove': (payload) => {
-      const record = payload as { id?: unknown } | null
-      const id = record?.id
-      if (typeof id !== 'string' || id === '') {
-        throw new AigcError('bad-request', 'expected { id: string }')
-      }
-      const result = store.remove(id)
-      if (!result.ok) throw new AigcError('bad-request', result.error)
-      return { providers: result.providers }
-    },
-    'config.get': () => {
-      return { ...toGlobalSettings(getResolved()), providers: store.list() }
-    },
   }
 }
 
 /** Plugin body. */
-export function apply(ctx: Context, config?: AigcCanvasConfig): void {
+export function apply(ctx: Context, config?: AigcEntryConfig): void {
   const resolved = resolveAigcConfig(config)
   const trustedHosts = trustedHostsOf(ctx)
   const fence = (req: IncomingMessage): boolean => isTrustedApiRequest(req, trustedHosts)
@@ -260,15 +211,19 @@ export function apply(ctx: Context, config?: AigcCanvasConfig): void {
   const canvas = createAigcCanvasService((sessionId) => sessionCwdOf(ctx, sessionId), mediaLimit)
   ctx.provide('aigcCanvas', canvas)
 
-  // Provider store (in-memory; settings-page CRUD + the model's
-  // aigc_provider_set_instructions both write through it).
+  // Provider store (read-through the entry's profile-owned Config while the
+  // settings provider is mounted; in-memory otherwise). The settings-page
+  // configForms writes, the model's aigc_provider_set_instructions tool,
+  // and hand-edited profile patches all land in the same committed list.
   const store = new ProviderStore(resolved.providers)
 
-  const getResolved = (): ResolvedAigcConfig => ({
-    providers: store.list(),
-    requestTimeoutMs: resolved.requestTimeoutMs,
-    mediaSizeLimit: resolved.mediaSizeLimit,
-  })
+  // Settings bridge (dsh 0.1.7-rc.1 DSH-0.1.7-J1-04): reads the live
+  // volatile reference, commits through the settings service into the
+  // active profile's cordis.patch.yml, and declares the own-page policy
+  // (this plugin ships its own plugins.row.config page; no schema-generated
+  // form). Read-through attaches once the settings provider is mounted;
+  // headless assemblies stay in-memory (composition seed only).
+  const bridge = installAigcSettings(ctx, config, { onReady: () => { store.attachPersistence(bridge) } })
 
   // Provider lookup for tools: by provider id, falling back to the default.
   const getProvider = (providerId?: string): ResolvedAigcProvider => {
@@ -300,7 +255,7 @@ export function apply(ctx: Context, config?: AigcCanvasConfig): void {
     }))
   }
 
-  const api = buildApi(ctx, canvas, store, getResolved)
+  const api = buildApi(ctx, canvas, mediaLimit)
 
   // ── JSON API ────────────────────────────────────────────────────────────
   ctx.effect(() => ctx.webServer.register({

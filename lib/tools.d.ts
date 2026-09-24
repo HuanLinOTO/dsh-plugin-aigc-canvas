@@ -31,7 +31,7 @@ export interface ProviderInfo {
  *
  * @param ctx - host plugin context (carries the tools service).
  * @param getProvider - live provider getter (takes optional provider id).
- * @param setInstructions - persists usage instructions for one provider (the host's ProviderStore).
+ * @param setInstructions - persists usage instructions for one provider (the host's ProviderStore; resolves after the profile-config commit).
  * @param listProviders - returns info for all providers (for aigc_get_provider_info).
  * @param canvas - the canvas registry service (host-owned state).
  * @param resolveCwd - live cwd resolver for one session id.
@@ -39,9 +39,9 @@ export interface ProviderInfo {
  * @param getMediaLimit - live cap on bytes the http tool may write to disk.
  * @returns a disposer that unregisters all tools.
  */
-export declare function registerTools(ctx: Context, getProvider: (providerId?: string) => ResolvedAigcProvider, setInstructions: (id: string, instructions: string) => {
+export declare function registerTools(ctx: Context, getProvider: (providerId?: string) => ResolvedAigcProvider, setInstructions: (id: string, instructions: string) => Promise<{
     ok: boolean;
     error?: string;
-}, listProviders: () => readonly ProviderInfo[], canvas: AigcCanvasService, resolveCwd: (sessionId: string) => string, getTimeoutMs: () => number, getMediaLimit?: () => number): () => void;
+}>, listProviders: () => readonly ProviderInfo[], canvas: AigcCanvasService, resolveCwd: (sessionId: string) => string, getTimeoutMs: () => number, getMediaLimit?: () => number): () => void;
 /** Re-export the projection helpers for the unit tests. */
 export { elementProjection, edgeProjection, titleOf };

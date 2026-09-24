@@ -1,5 +1,21 @@
 /**
- * SettingsPage — the AIGC canvas settings section: provider list CRUD.
+ * SettingsPage — the AIGC canvas row-configuration page: provider list CRUD.
+ *
+ * Mounts as the bundle row's `plugins.row.config` entry on the Plugins page
+ * (dsh 0.1.7-rc.1): `view: 'summary'` renders the one-line description the
+ * row page falls back to when the row declares none; `view: 'page'` renders
+ * the editor under the page's own title/breadcrumb. The optional owner
+ * `form` is the page-assembled ConfigPageForm; this editor keeps its own
+ * reactive binding (below), and an undefined `form` means the entry's config
+ * is not served (row freshly disabled) — the editor reports that instead.
+ *
+ * Transport (dsh 0.1.7-rc.1 DSH-0.1.7-J1-27): reads/writes ride the entry's
+ * shared config form (`ctx.configForms.get('dsh-aigc-canvas')`, provided by
+ * the ui-settings base and bound reactively into this component as the
+ * `useAigcSettings` hook through the registration's `hooks` compartment).
+ * Saves are whole-list writes through `form.set('providers', …)`; the host
+ * persists them into the active profile's `cordis.patch.yml` under the
+ * entry id.
  *
  * Visual language: matches ModelsSection / GeneralSection / yet-another-subagent —
  * outlined rowCard per provider (border-l2, r12, p12/14), filled editor surface
@@ -25,99 +41,157 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { Modal, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
-import {
-  addProvider,
-  fetchConfig,
-  removeProvider,
-  updateProvider,
-  type RuntimeProvider,
-} from './api.js'
+// Type-only: pulls the 'plugins.row.config' SlotMap row (the Plugins page
+// owner props: view + optional page-assembled form).
+import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
+import { type AigcFormSnapshot, type RuntimeProvider } from './api.js'
+import { validateProviderId } from '../provider-shape.js'
 import css from './SettingsPage.module.css'
 
-/** Inject face: locale translate + conversation send (for the init action). */
+/** Reactive source shape the renderer binds as the useAigcSettings hook. */
+export interface AigcSettingsSource {
+  getSnapshot(): AigcFormSnapshot
+  subscribe(listener: () => void): () => void
+}
+
+/** Inject face: locale translate + conversation send + the settings form. */
 export interface AigcSettingsInjected {
   readonly t: (key: string) => string
   /** Send a prompt into the current conversation scope (queued turn). */
   readonly send: (text: string) => Promise<void>
+  /** Reactive snapshot of the entry's config form (bound as useAigcSettings). */
+  readonly hooks: { aigcSettings: AigcSettingsSource }
+  /**
+   * Commit a replacement provider list through the entry's config form;
+   * resolves to whether the host accepted the write.
+   */
+  readonly saveProviders: (providers: readonly RuntimeProvider[]) => Promise<boolean>
 }
 
-/** Full props: settings.section runtime share + locale seat + inject. */
-type SettingsPageProps = PropsRuntime<'settings.section'> & PropsLocale<'dsh-aigc-canvas'> & AigcSettingsInjected
+/**
+ * Full props: plugins.row.config runtime share (view + optional page-assembled
+ * form) + locale seat + the inject face (the hooks compartment arrives bound
+ * as the useAigcSettings selector hook).
+ */
+type SettingsPageProps = PropsRuntime<'plugins.row.config'>
+  & PropsLocale<'dsh-aigc-canvas'>
+  & InjectFace<AigcSettingsInjected>
 
 /** Default shape for a brand-new draft (before the user fills in id/name). */
 function emptyDraft(): RuntimeProvider {
   return { id: '', name: '', endpoint: 'stub://aigc-backend', apiKey: '', instructions: '', auth: { scheme: 'bearer', name: '' }, builtin: false }
 }
 
+/** Clone the committed list into editable drafts (auth object detached). */
+function toDrafts(providers: readonly RuntimeProvider[]): RuntimeProvider[] {
+  return providers.map(p => ({ ...p, auth: { ...p.auth } }))
+}
+
 /**
- * Render the AIGC provider settings page.
- * @param props - settings.section runtime share + locale + inject.
- * @returns the page element.
+ * Render the AIGC provider configuration entry.
+ *
+ * `view: 'summary'` returns the one-line description; `view: 'page'` renders
+ * the CRUD editor (with its own hook set, in {@link ProviderEditor} below).
+ * Branching before any hook keeps both arms hook-stable.
+ *
+ * @param props - plugins.row.config runtime share + locale + inject + form hook.
+ * @returns the summary one-liner or the page element.
  */
-export function SettingsPage({ t, send }: SettingsPageProps) {
-  const [providers, setProviders] = useState<readonly RuntimeProvider[]>([])
+export function SettingsPage(props: SettingsPageProps) {
+  // The row page draws its own title and description; `summary` only supplies
+  // the fallback one-liner when the row declares no description metadata.
+  if (props.view === 'summary') return <span>{props.t('rowSummary')}</span>
+  return <ProviderEditor {...props} />
+}
+
+/**
+ * Render the provider CRUD editor (the `view: 'page'` arm).
+ *
+ * Reads the committed provider list through the entry's config form
+ * (dsh 0.1.7-rc.1 DSH-0.1.7-J1-27: `ctx.configForms.get('dsh-aigc-canvas')`,
+ * bound reactively as `useAigcSettings`) and writes whole-list replacements
+ * through `saveProviders`. Local drafts re-seed from the committed list on
+ * every revision bump — own saves land there, and so do external writers
+ * (e.g. the model's aigc_provider_set_instructions tool).
+ *
+ * @param props - plugins.row.config runtime share + locale + inject + form hook.
+ * @returns the editor element.
+ */
+function ProviderEditor({ form, t, send, useAigcSettings, saveProviders }: SettingsPageProps) {
+  const snapshot = useAigcSettings(s => s)
+
+  const providers = snapshot.status === 'ready' && snapshot.value !== undefined ? snapshot.value.providers : []
   const [drafts, setDrafts] = useState<readonly RuntimeProvider[]>([])
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [addingNew, setAddingNew] = useState(false)
   const [newDraft, setNewDraft] = useState<RuntimeProvider>(emptyDraft())
-  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | undefined>(undefined)
   const [confirmDelete, setConfirmDelete] = useState<string | undefined>(undefined)
 
-  const refresh = useCallback(async () => {
-    setLoading(true)
+  // Seed local drafts from the committed list: on first readiness and after
+  // every committed revision bump. A bump means OUR entry's document moved —
+  // an own save, another tab, or the model's instruction write — so the
+  // drafts always follow the latest committed state (same behaviour as the
+  // previous RPC page, which re-seeded from every mutation result).
+  const { status, revision, value } = snapshot
+  useEffect(() => {
+    if (status !== 'ready' || value === undefined) return
+    setDrafts(toDrafts(value.providers))
+    // `revision` gates the re-seed; the value is read synchronously inside.
+  }, [status, revision])
+
+  const commit = useCallback(async (next: readonly RuntimeProvider[]): Promise<boolean> => {
     setError(undefined)
     try {
-      const result = await fetchConfig()
-      setProviders(result.providers)
-      setDrafts(result.providers.map(p => ({ ...p, auth: { ...p.auth } })))
+      const accepted = await saveProviders(next)
+      if (!accepted) {
+        setError(t('settingsSaveFailed'))
+        return false
+      }
+      return true
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setLoading(false)
+      return false
     }
-  }, [])
-
-  useEffect(() => { void refresh() }, [refresh])
+  }, [saveProviders, t])
 
   const add = useCallback(async () => {
     if (newDraft.id === '') return
-    try {
-      const result = await addProvider(newDraft)
-      setProviders(result.providers)
-      setDrafts(result.providers.map(p => ({ ...p, auth: { ...p.auth } })))
+    const idError = validateProviderId(newDraft.id)
+    if (idError !== undefined) {
+      setError(idError)
+      return
+    }
+    if (providers.some(p => p.id === newDraft.id)) {
+      setError(`provider id already exists: ${newDraft.id}`)
+      return
+    }
+    // Mutations added at runtime are never builtin (mirrors the host store).
+    const stored = { ...newDraft, builtin: false }
+    const ok = await commit([...providers, stored])
+    if (ok) {
       setExpanded(new Set([...expanded, newDraft.id]))
       setAddingNew(false)
       setNewDraft(emptyDraft())
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
     }
-  }, [expanded, newDraft])
+  }, [commit, expanded, newDraft, providers])
 
   const update = useCallback(async (draft: RuntimeProvider) => {
-    try {
-      const result = await updateProvider(draft)
-      setProviders(result.providers)
-      setDrafts(result.providers.map(p => ({ ...p, auth: { ...p.auth } })))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }, [])
+    // Build the next list from the COMMITTED value with only this card's
+    // draft applied — sibling cards keep their edits private until saved.
+    await commit(providers.map(p => (p.id === draft.id ? draft : p)))
+  }, [commit, providers])
 
   const remove = useCallback(async (id: string) => {
-    try {
-      const result = await removeProvider(id)
-      setProviders(result.providers)
-      setDrafts(result.providers.map(p => ({ ...p, auth: { ...p.auth } })))
+    const ok = await commit(providers.filter(p => p.id !== id))
+    if (ok) {
       const next = new Set(expanded)
       next.delete(id)
       setExpanded(next)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
     }
-  }, [expanded])
+  }, [commit, expanded, providers])
 
   const init = useCallback(async (provider: RuntimeProvider) => {
     const label = provider.name === '' ? provider.id : provider.name
@@ -147,9 +221,19 @@ export function SettingsPage({ t, send }: SettingsPageProps) {
 
   const defaultId = providers.length > 0 ? providers[0]?.id : undefined
 
+  // The page assembles the owner `form` from the served configurations; an
+  // undefined form means the entry's config left the served set (row freshly
+  // disabled) and the editor has nothing to bind — report instead of editing.
+  if (form === undefined) {
+    return (
+      <section className={css.section}>
+        <p className={css.empty}>{t('settingsUnavailable')}</p>
+      </section>
+    )
+  }
+
   return (
     <section className={css.section}>
-      <h2 className={css.title}>{t('settingsTitle')}</h2>
       <p className={css.intro}>{t('settingsIntro')}</p>
       {error !== undefined && (
         <div className={css.error}>
@@ -157,8 +241,13 @@ export function SettingsPage({ t, send }: SettingsPageProps) {
           <button type="button" className={css.errorDismiss} onClick={() => setError(undefined)}>×</button>
         </div>
       )}
-      {loading ? (
+      {status === 'ready' && !snapshot.writable && (
+        <p className={css.intro}>{t('settingsReadOnly')}</p>
+      )}
+      {status === 'loading' ? (
         <div className={css.loading}>{t('settingsLoading')}</div>
+      ) : status === 'unavailable' ? (
+        <p className={css.empty}>{t('settingsUnavailable')}</p>
       ) : providers.length === 0 && !addingNew ? (
         <p className={css.empty}>{t('settingsEmpty')}</p>
       ) : (
@@ -192,7 +281,7 @@ export function SettingsPage({ t, send }: SettingsPageProps) {
           )}
         </ul>
       )}
-      {!loading && !addingNew && (
+      {status === 'ready' && !addingNew && (
         <button type="button" className={css.addBlockButton} onClick={() => setAddingNew(true)}>
           {t('settingsAdd')}
         </button>

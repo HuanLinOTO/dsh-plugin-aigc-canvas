@@ -1,6 +1,6 @@
 {
   "name": "@huanlin/dsh-plugin-aigc-canvas",
-  "version": "0.1.10",
+  "version": "0.2.0",
   "publishConfig": {
     "access": "public"
   },
@@ -22,6 +22,7 @@
       "types": "./lib/types/client/service.d.ts",
       "default": "./lib/client.js"
     },
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "engines": {
@@ -30,6 +31,7 @@
   "files": [
     "lib/",
     "assets/",
+    "locale/",
     "cordis.patch.yml"
   ],
   "dsh": {
@@ -43,6 +45,7 @@
         "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
         "@deepseek-ai/dsh-client-ui-primitives"
       ],
       "platform": "web"
@@ -65,6 +68,7 @@
     "@deepseek-ai/dsh-client-locale": "^0.1.7-rc.1",
     "@deepseek-ai/dsh-client-ui-primitives": "^0.1.7-rc.1",
     "@deepseek-ai/dsh-client-ui-settings": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-ui-plugin-manager": "^0.1.7-rc.1",
     "@deepseek-ai/dsh-client-ui-conversation": "^0.1.7-rc.1",
     "@deepseek-ai/dsh-client-ui-renderer": "^0.1.7-rc.1",
     "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-rc.1",
@@ -87,6 +91,9 @@
       "optional": true
     },
     "@deepseek-ai/dsh-client-ui-settings": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-plugin-manager": {
       "optional": true
     },
     "@deepseek-ai/dsh-client-ui-conversation": {
@@ -125,6 +132,7 @@
     "@deepseek-ai/dsh-client-locale": "link:D:/Projects/deepseek-harness/dsh/packages/client/locale",
     "@deepseek-ai/dsh-client-ui-primitives": "link:D:/Projects/deepseek-harness/dsh/packages/client/ui-primitives",
     "@deepseek-ai/dsh-client-ui-settings": "link:D:/Projects/deepseek-harness/dsh/packages/client/ui-settings",
+    "@deepseek-ai/dsh-client-ui-plugin-manager": "link:D:/Projects/deepseek-harness/dsh/packages/client/ui-plugin-manager",
     "@deepseek-ai/dsh-client-ui-conversation": "link:D:/Projects/deepseek-harness/dsh/packages/client/ui-conversation",
     "@deepseek-ai/dsh-client-ui-renderer": "link:D:/Projects/deepseek-harness/dsh/packages/client/ui-renderer",
     "@deepseek-ai/dsh-client-ui-slots": "link:D:/Projects/deepseek-harness/dsh/packages/client/ui-slots",

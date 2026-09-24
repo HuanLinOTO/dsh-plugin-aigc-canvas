@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "AIGC Canvas",
+    "description": "An infinite free canvas for better-sidebar plus provider-agnostic generation: the agent calls any configured provider via aigc_http_request (endpoint + apiKey attached automatically) and places generated images, videos, and audio at arbitrary canvas positions; double-click an element to inspect its prompt and params."
+  }
+}

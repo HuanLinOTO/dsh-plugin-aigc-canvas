@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@deepseek-ai/schemastery':
-        specifier: ^3.18.4
-        version: 3.18.4
       ws:
         specifier: ^8.18.0
         version: 8.21.3
@@ -48,6 +45,9 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: link:D:/Projects/deepseek-harness/dsh/packages/core/tools
         version: link:../dsh/packages/core/tools
+      '@deepseek-ai/schemastery':
+        specifier: link:D:/Projects/deepseek-harness/dsh/vendor/schemastery
+        version: link:../dsh/vendor/schemastery
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.3
@@ -83,12 +83,6 @@ importers:
         version: 3.2.7(@types/node@24.13.3)
 
 packages:
-
-  '@deepseek-ai/cosmokit@1.8.5':
-    resolution: {integrity: sha512-LXsrlem9z8dq4sLflj2yuCuYX7KqhdzF5hZly3eZyuTo8d6oDSOXuEgC5DbQWKW+lksm6zmOutQLsP/ma6wR6A==}
-
-  '@deepseek-ai/schemastery@3.18.4':
-    resolution: {integrity: sha512-SSXO6tYuyrIqKVbmOnIq0s+riUywYzouFMcnBluHF9n4KMo2G8HvEzhCYj6pj2617/glOjbJuVInJ9hfONsjkg==}
 
   '@esbuild/aix-ppc64@0.28.2':
     resolution: {integrity: sha512-XExcO+dvLKvVtNTibSTBej1NCAbaGhWn9Ww1ZPx80qsahhPFe/8jgWP0IchNe0F3HwkU7n8ejhH8bjonqht8mQ==}
@@ -1083,13 +1077,6 @@ packages:
     resolution: {integrity: sha512-sw41wouvT5rUmLIp87hmvm5vtF+MRSI3x6yjq6xqpYmtkQj+Ht6N7xRQ8lMhLv8N7JAzughGj0Rfi0jQRSu9HQ==}
 
 snapshots:
-
-  '@deepseek-ai/cosmokit@1.8.5': {}
-
-  '@deepseek-ai/schemastery@3.18.4':
-    dependencies:
-      '@deepseek-ai/cosmokit': 1.8.5
-      '@standard-schema/spec': 1.1.0
 
   '@esbuild/aix-ppc64@0.28.2':
     optional: true
